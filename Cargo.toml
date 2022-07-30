@@ -12,7 +12,7 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 
 [features]
-default = ["std", "embedded-svc?/alloc", "embedded-svc"]
+default = ["std", "embedded-svc?/alloc"]
 
 std = ["embedded-svc?/std"]
 
