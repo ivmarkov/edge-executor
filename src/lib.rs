@@ -176,6 +176,45 @@ where
         }
     }
 
+    pub fn tick_until<U>(&mut self, context: &RunContext, until: &U) -> bool
+    where
+        U: Fn() -> bool,
+    {
+        while !until() {
+            if !self.tick(context) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn run<U, T>(&mut self, context: &RunContext, until: U, tasks: Option<T>)
+    where
+        U: Fn() -> bool,
+    {
+        self.run_until(context, until);
+
+        if let Some(tasks) = tasks {
+            self.drop_tasks(context, tasks)
+        }
+    }
+
+    pub fn run_until<U>(&mut self, context: &RunContext, until: U)
+    where
+        U: Fn() -> bool,
+    {
+        while self.tick_until(context, &until) {
+            self.wait(context);
+        }
+    }
+
+    pub fn drop_tasks<T>(&mut self, context: &RunContext, tasks: T) {
+        drop(tasks);
+
+        while self.tick(context) {}
+    }
+
     pub fn wait(&mut self, _context: &RunContext) {
         self.wait.wait();
     }
