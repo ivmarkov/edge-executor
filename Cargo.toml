@@ -1,0 +1,26 @@
+[package]
+name = "edge-executor"
+version = "0.1.0"
+authors = ["Ivan Markov <ivan.markov@gmail.com>"]
+edition = "2018"
+resolver = "2"
+categories = ["embedded", "hardware-support"]
+keywords = ["embedded", "async", "executor"]
+description = "Async executor suitable for embedded environments."
+repository = "https://github.com/ivmarkov/edge-executor"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[features]
+default = ["std"]
+
+std = []
+
+[dependencies]
+heapless = { version = "0.7" }
+async-task = { version = "4", default-features = false }
+waker-fn = { version = "1.1", default-features = false }
+log = { version = "0.4", default-features = false }
+
+[dev-dependencies]
+simple_logger="2.2"
