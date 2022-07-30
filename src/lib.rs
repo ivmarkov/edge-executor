@@ -292,7 +292,7 @@ mod std {
         fn wait(&self) {
             let guard = self.0.lock().unwrap();
 
-            let _ = self.1.wait(guard).unwrap();
+            drop(self.1.wait(guard).unwrap());
         }
     }
 
