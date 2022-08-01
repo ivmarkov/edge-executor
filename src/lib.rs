@@ -8,9 +8,11 @@ use core::task::{Context, Poll};
 extern crate alloc;
 use alloc::sync::Arc;
 
-use async_task::{Runnable, Task};
+use async_task::Runnable;
 
 use heapless::mpmc::MpMcQueue;
+
+pub use async_task::Task;
 
 #[cfg(feature = "std")]
 pub use crate::std::*;
@@ -18,11 +20,15 @@ pub use crate::std::*;
 #[derive(Debug)]
 pub enum SpawnError {
     QueueFull,
+    CollectorFull,
 }
 
 impl fmt::Display for SpawnError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Queue Full Error")
+        match self {
+            Self::QueueFull => write!(f, "Queue Full Error"),
+            Self::CollectorFull => write!(f, "Collector Full Error"),
+        }
     }
 }
 
@@ -31,15 +37,6 @@ impl ::std::error::Error for SpawnError {}
 
 pub trait Wait {
     fn wait(&self);
-}
-
-impl<F> Wait for F
-where
-    F: Fn(),
-{
-    fn wait(&self) {
-        (self)()
-    }
 }
 
 pub trait Notify: Send + Sync {
@@ -104,7 +101,15 @@ where
     N: NotifyFactory + RunContextFactory,
     W: Wait,
 {
-    pub fn new(notify_factory: N, wait: W) -> Self {
+    pub fn new() -> Self
+    where
+        N: Default,
+        W: Default,
+    {
+        Self::wrap(Default::default(), Default::default())
+    }
+
+    pub fn wrap(notify_factory: N, wait: W) -> Self {
         Self {
             queue: Arc::new(MpMcQueue::<_, C>::new()),
             notify_factory,
@@ -120,6 +125,24 @@ where
         T: 'a,
     {
         self.spawn(fut)?.detach();
+
+        Ok(self)
+    }
+
+    pub fn spawn_collect<F, T>(
+        &mut self,
+        fut: F,
+        collector: &mut heapless::Vec<Task<T>, C>,
+    ) -> Result<&mut Self, SpawnError>
+    where
+        F: Future<Output = T> + Send + 'a,
+        T: 'a,
+    {
+        let task = self.spawn(fut)?;
+
+        collector
+            .push(task)
+            .map_err(|_| SpawnError::CollectorFull)?;
 
         Ok(self)
     }
@@ -235,6 +258,24 @@ where
         Ok(self)
     }
 
+    pub fn spawn_local_collect<F, T>(
+        &mut self,
+        fut: F,
+        collector: &mut heapless::Vec<Task<T>, C>,
+    ) -> Result<&mut Self, SpawnError>
+    where
+        F: Future<Output = T> + 'a,
+        T: 'a,
+    {
+        let task = self.spawn_local(fut)?;
+
+        collector
+            .push(task)
+            .map_err(|_| SpawnError::CollectorFull)?;
+
+        Ok(self)
+    }
+
     pub fn spawn_local<F, T>(&mut self, fut: F) -> Result<Task<T>, SpawnError>
     where
         F: Future<Output = T> + 'a,
@@ -312,10 +353,6 @@ mod std {
     pub struct StdWait(Rc<Mutex<()>>, Arc<Condvar>);
 
     impl StdWait {
-        pub fn new() -> Self {
-            Self(Rc::new(Mutex::new(())), Arc::new(Condvar::new()))
-        }
-
         pub fn notify_factory(&self) -> Arc<Condvar> {
             self.1.clone()
         }
@@ -323,7 +360,7 @@ mod std {
 
     impl Default for StdWait {
         fn default() -> Self {
-            Self::new()
+            Self(Rc::new(Mutex::new(())), Arc::new(Condvar::new()))
         }
     }
 
@@ -335,7 +372,8 @@ mod std {
         }
     }
 
-    pub type StdNotifyFactory = Arc<Condvar>;
+    #[derive(Clone)]
+    pub struct StdNotifyFactory(Arc<Condvar>);
 
     impl NotifyFactory for StdNotifyFactory {
         type Notify = Self;
@@ -345,11 +383,17 @@ mod std {
         }
     }
 
+    impl Default for StdNotifyFactory {
+        fn default() -> Self {
+            Self(Default::default())
+        }
+    }
+
     impl RunContextFactory for StdNotifyFactory {}
 
     impl Notify for StdNotifyFactory {
         fn notify(&self) {
-            self.notify_one();
+            self.0.notify_one();
         }
     }
 }
