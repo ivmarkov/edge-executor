@@ -311,6 +311,16 @@ where
     }
 }
 
+impl<'a, const C: usize, N, W, S> Default for Executor<'a, C, N, W, S>
+where
+    N: NotifyFactory + RunContextFactory + Default,
+    W: Default,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone)]
 pub struct Blocker<N, W>(N, W);
 
@@ -320,7 +330,15 @@ where
     N::Notify: 'static,
     W: Wait,
 {
-    pub const fn new(notify_factory: N, wait: W) -> Self {
+    pub fn new() -> Self
+    where
+        N: Default,
+        W: Default,
+    {
+        Self(Default::default(), Default::default())
+    }
+
+    pub const fn wrap(notify_factory: N, wait: W) -> Self {
         Self(notify_factory, wait)
     }
 
@@ -348,6 +366,17 @@ where
 
             self.1.wait();
         }
+    }
+}
+
+impl<N, W> Default for Blocker<N, W>
+where
+    N: NotifyFactory + Default,
+    N::Notify: 'static,
+    W: Wait + Default,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
