@@ -85,7 +85,7 @@ pub type Sendable = ();
 ///     from an ISR (i.e. allocation/deallocation routines should be protected by critical sections that disable/enable interrupts);
 ///   - Out of the box implementations for [Wait] & [Notify] based on condvars, compatible with Rust STD
 ///     (for cases where notifying from / running in ISRs is not important).
-pub struct Executor<'a, const C: usize, N, W, S = Sendable> {
+pub struct Executor<'a, const C: usize, N, W, S = Local> {
     #[cfg(feature = "crossbeam-queue")]
     queue: Arc<crossbeam_queue::ArrayQueue<Runnable>>,
     #[cfg(not(feature = "crossbeam-queue"))]
