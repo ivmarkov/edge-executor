@@ -23,4 +23,4 @@ waker-fn = { version = "1.1", default-features = false }
 log = { version = "0.4", default-features = false }
 
 [dev-dependencies]
-simple_logger="2.2"
+simple_logger = "2.2"
