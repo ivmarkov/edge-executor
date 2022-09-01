@@ -312,9 +312,9 @@ where
 }
 
 #[derive(Clone)]
-pub struct EmbeddedBlocker<N, W>(N, W);
+pub struct Blocker<N, W>(N, W);
 
-impl<N, W> EmbeddedBlocker<N, W>
+impl<N, W> Blocker<N, W>
 where
     N: NotifyFactory,
     N::Notify: 'static,
@@ -352,7 +352,7 @@ where
 }
 
 #[cfg(feature = "embedded-svc")]
-impl<N, W> embedded_svc::executor::asynch::Blocker for EmbeddedBlocker<N, W>
+impl<N, W> embedded_svc::executor::asynch::Blocker for Blocker<N, W>
 where
     N: NotifyFactory,
     N::Notify: 'static,
@@ -362,7 +362,7 @@ where
     where
         F: Future,
     {
-        EmbeddedBlocker::block_on(self, f)
+        Blocker::block_on(self, f)
     }
 }
 
