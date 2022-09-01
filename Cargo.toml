@@ -1,6 +1,6 @@
 [package]
 name = "edge-executor"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["Ivan Markov <ivan.markov@gmail.com>"]
 edition = "2018"
 resolver = "2"
@@ -13,7 +13,7 @@ readme = "README.md"
 
 [features]
 default = ["std", "crossbeam-queue"]
-std = []
+std = ["embedded-svc?/std"]
 
 [dependencies]
 heapless = { version = "0.7" }
@@ -21,9 +21,9 @@ crossbeam-queue = { version = "0.3", optional = true }
 async-task = { version = "4", default-features = false }
 waker-fn = { version = "1.1", default-features = false }
 log = { version = "0.4", default-features = false }
-#embedded-svc = { version = "0.22", default-features = false, optional = true, features = ["experimental"] }
-embedded-svc = { version = "0.22", git = "https://github.com/esp-rs/embedded-svc", branch = "next", optional = true, features = ["experimental"] }
-#embedded-svc = { version = "0.22", path = "../embedded-svc", optional = true, features = ["experimental"] }
+#embedded-svc = { version = "0.22", default-features = false, optional = true, default-features = false, features = ["experimental"] }
+embedded-svc = { version = "0.22", git = "https://github.com/esp-rs/embedded-svc", branch = "next", optional = true, default-features = false, features = ["experimental"] }
+#embedded-svc = { version = "0.22", path = "../embedded-svc", optional = true, default-features = false, features = ["experimental"] }
 
 [dev-dependencies]
 simple_logger = "2.2"
