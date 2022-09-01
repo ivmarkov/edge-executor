@@ -10,8 +10,6 @@ use alloc::sync::Arc;
 
 use async_task::Runnable;
 
-use heapless::mpmc::MpMcQueue;
-
 pub use async_task::Task;
 
 #[cfg(feature = "std")]
@@ -88,7 +86,10 @@ pub type Sendable = ();
 ///   - Out of the box implementations for [Wait] & [Notify] based on condvars, compatible with Rust STD
 ///     (for cases where notifying from / running in ISRs is not important).
 pub struct Executor<'a, const C: usize, N, W, S = Sendable> {
-    queue: Arc<MpMcQueue<Runnable, C>>,
+    #[cfg(feature = "crossbeam-queue")]
+    queue: Arc<crossbeam_queue::ArrayQueue<Runnable>>,
+    #[cfg(not(feature = "crossbeam-queue"))]
+    queue: Arc<heapless::mpmc::MpMcQueue<Runnable, C>>,
     notify_factory: N,
     wait: W,
     _sendable: PhantomData<S>,
@@ -99,7 +100,6 @@ pub struct Executor<'a, const C: usize, N, W, S = Sendable> {
 impl<'a, const C: usize, N, W, S> Executor<'a, C, N, W, S>
 where
     N: NotifyFactory + RunContextFactory,
-    W: Wait,
 {
     pub fn new() -> Self
     where
@@ -111,7 +111,10 @@ where
 
     pub fn wrap(notify_factory: N, wait: W) -> Self {
         Self {
-            queue: Arc::new(MpMcQueue::<_, C>::new()),
+            #[cfg(feature = "crossbeam-queue")]
+            queue: Arc::new(crossbeam_queue::ArrayQueue::new(C)),
+            #[cfg(not(feature = "crossbeam-queue"))]
+            queue: Arc::new(heapless::mpmc::MpMcQueue::<_, C>::new()),
             notify_factory,
             wait,
             _sendable: PhantomData,
@@ -164,7 +167,16 @@ where
             let notify = self.notify_factory.notifier();
 
             move |runnable| {
-                queue.enqueue(runnable).unwrap();
+                #[cfg(feature = "crossbeam-queue")]
+                {
+                    queue.push(runnable).unwrap();
+                }
+
+                #[cfg(not(feature = "crossbeam-queue"))]
+                {
+                    queue.enqueue(runnable).unwrap();
+                }
+
                 notify.notify();
             }
         };
@@ -189,8 +201,20 @@ where
         result
     }
 
-    pub fn tick(&mut self, _context: &RunContext) -> bool {
-        if let Some(runnable) = self.queue.dequeue() {
+    pub fn run_one_scheduled(&mut self, _context: &RunContext) -> bool {
+        let runnable;
+
+        #[cfg(feature = "crossbeam-queue")]
+        {
+            runnable = self.queue.pop();
+        }
+
+        #[cfg(not(feature = "crossbeam-queue"))]
+        {
+            runnable = self.queue.dequeue();
+        }
+
+        if let Some(runnable) = runnable {
             runnable.run();
 
             true
@@ -199,12 +223,12 @@ where
         }
     }
 
-    pub fn tick_until<U>(&mut self, context: &RunContext, until: &U) -> bool
+    pub fn run_all_scheduled<B>(&mut self, context: &RunContext, condition: B) -> bool
     where
-        U: Fn() -> bool,
+        B: Fn() -> bool,
     {
-        while !until() {
-            if !self.tick(context) {
+        while condition() {
+            if !self.run_one_scheduled(context) {
                 return true;
             }
         }
@@ -212,33 +236,36 @@ where
         false
     }
 
-    pub fn run<U, T>(&mut self, context: &RunContext, until: U, tasks: Option<T>)
+    pub fn run<B>(&mut self, context: &RunContext, condition: B)
     where
-        U: Fn() -> bool,
+        W: Wait,
+        B: Fn() -> bool,
     {
-        self.run_until(context, until);
-
-        if let Some(tasks) = tasks {
-            self.drop_tasks(context, tasks)
+        while self.run_all_scheduled(context, &condition) {
+            self.wait(context);
         }
     }
 
-    pub fn run_until<U>(&mut self, context: &RunContext, until: U)
+    pub fn run_tasks<B, T>(&mut self, context: &RunContext, condition: B, tasks: T)
     where
-        U: Fn() -> bool,
+        W: Wait,
+        B: Fn() -> bool,
     {
-        while self.tick_until(context, &until) {
-            self.wait(context);
-        }
+        self.run(context, condition);
+
+        self.drop_tasks(context, tasks)
     }
 
     pub fn drop_tasks<T>(&mut self, context: &RunContext, tasks: T) {
         drop(tasks);
 
-        while self.tick(context) {}
+        while self.run_one_scheduled(context) {}
     }
 
-    pub fn wait(&mut self, _context: &RunContext) {
+    pub fn wait(&mut self, _context: &RunContext)
+    where
+        W: Wait,
+    {
         self.wait.wait();
     }
 }
@@ -246,7 +273,6 @@ where
 impl<'a, const C: usize, N, W> Executor<'a, C, N, W, Local>
 where
     N: NotifyFactory + RunContextFactory,
-    W: Wait,
 {
     pub fn spawn_local_detached<F, T>(&mut self, fut: F) -> Result<&mut Self, SpawnError>
     where
