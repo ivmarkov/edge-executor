@@ -408,6 +408,10 @@ mod std {
     pub struct StdWait(Rc<Mutex<()>>, Arc<Condvar>);
 
     impl StdWait {
+        pub fn new() -> Self {
+            Self(Rc::new(Mutex::new(())), Arc::new(Condvar::new()))
+        }
+
         pub fn notify_factory(&self) -> Arc<Condvar> {
             self.1.clone()
         }
@@ -415,7 +419,7 @@ mod std {
 
     impl Default for StdWait {
         fn default() -> Self {
-            Self(Rc::new(Mutex::new(())), Arc::new(Condvar::new()))
+            Self::new()
         }
     }
 
@@ -427,20 +431,20 @@ mod std {
         }
     }
 
-    #[derive(Clone)]
+    #[derive(Default, Clone)]
     pub struct StdNotifyFactory(Arc<Condvar>);
+
+    impl StdNotifyFactory {
+        pub fn new() -> Self {
+            Self(Arc::new(Condvar::new()))
+        }
+    }
 
     impl NotifyFactory for StdNotifyFactory {
         type Notify = Self;
 
         fn notifier(&self) -> Self::Notify {
             self.clone()
-        }
-    }
-
-    impl Default for StdNotifyFactory {
-        fn default() -> Self {
-            Self(Default::default())
         }
     }
 
