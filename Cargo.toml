@@ -14,6 +14,7 @@ readme = "README.md"
 [features]
 default = ["std", "crossbeam-queue"]
 std = ["embedded-svc?/std"]
+wasm = ["wasm-bindgen", "js-sys"]
 
 [dependencies]
 heapless = { version = "0.7" }
@@ -24,6 +25,10 @@ log = { version = "0.4", default-features = false }
 #embedded-svc = { version = "0.23", default-features = false, optional = true, default-features = false, features = ["experimental"] }
 embedded-svc = { version = "0.23", git = "https://github.com/esp-rs/embedded-svc", optional = true, default-features = false, features = ["experimental"] }
 #embedded-svc = { version = "0.23", path = "../embedded-svc", optional = true, default-features = false, features = ["experimental"] }
+
+# WASM dependencies
+wasm-bindgen = { version = "0.2.82", optional = true }
+js-sys = { version = "0.3", optional = true }
 
 [dev-dependencies]
 simple_logger = "2.2"

@@ -15,6 +15,9 @@ pub use async_task::Task;
 #[cfg(feature = "std")]
 pub use crate::std::*;
 
+#[cfg(feature = "wasm")]
+pub use crate::wasm::*;
+
 #[derive(Debug)]
 pub enum SpawnError {
     QueueFull,
@@ -33,35 +36,25 @@ impl fmt::Display for SpawnError {
 #[cfg(feature = "std")]
 impl ::std::error::Error for SpawnError {}
 
-pub trait Wait {
-    fn wait(&self);
-}
-
-pub trait Notify: Send + Sync {
+pub trait Notify {
     fn notify(&self);
 }
 
-impl<F> Notify for F
-where
-    F: Fn() + Send + Sync,
-{
-    fn notify(&self) {
-        (self)()
-    }
-}
-
-pub trait NotifyFactory {
+pub trait Monitor {
     type Notify: Notify;
 
     fn notifier(&self) -> Self::Notify;
 }
 
-pub trait RunContextFactory {
-    fn prerun(&self) {}
-    fn postrun(&self) {}
+pub trait Wait {
+    fn wait(&self);
 }
 
-pub struct RunContext(());
+pub trait Start {
+    fn start<P>(&self, poll_fn: P)
+    where
+        P: Fn() + 'static;
+}
 
 pub type Local = *const ();
 pub type Sendable = ();
@@ -75,7 +68,7 @@ pub type Sendable = ();
 /// - `no_std` (but does need `alloc`; for a `no_std` *and* "no_alloc" executor, look at [Embassy](::embassy), which statically pre-allocates all tasks);
 ///            (note also that usage of `alloc` is very limited - only when a new task is being spawn, as well as the executor itself);
 /// - Does not assume an RTOS and can run completely bare-metal (or on top of an RTOS);
-/// - Pluggable [Wait] & [Notify] mechanism which makes it ISR-friendly. In particular:
+/// - Pluggable [Monitor] mechanism which makes it ISR-friendly. In particular:
 ///   - Tasks can be woken up (and thus re-scheduled) from within an ISR;
 ///   - The executor itself can run not just in the main "thread", but from within an ISR as well;
 ///     the latter is important for bare-metal non-RTOS use-cases, as it allows - by running multiple executors -
@@ -83,46 +76,44 @@ pub type Sendable = ();
 ///     tasks in executors that run on (higher-level) ISRs and thus pre-empt the executors
 ///     scheduled on lower-level ISR and the "main thread" one; note that deploying an executor in an ISR requires the allocator to be usable
 ///     from an ISR (i.e. allocation/deallocation routines should be protected by critical sections that disable/enable interrupts);
-///   - Out of the box implementations for [Wait] & [Notify] based on condvars, compatible with Rust STD
+///   - Out of the box implementation for [Monitor] based on condvar, compatible with Rust STD
 ///     (for cases where notifying from / running in ISRs is not important).
-pub struct Executor<'a, const C: usize, N, W, S = Local> {
+///   - Out of the box implementation for [Monitor] based on WASM event loop, compatible with WASM
+pub struct Executor<'a, const C: usize, M, S = Local> {
     #[cfg(feature = "crossbeam-queue")]
     queue: Arc<crossbeam_queue::ArrayQueue<Runnable>>,
     #[cfg(not(feature = "crossbeam-queue"))]
     queue: Arc<heapless::mpmc::MpMcQueue<Runnable, C>>,
-    notify_factory: N,
-    wait: W,
+    monitor: M,
     _sendable: PhantomData<S>,
     _marker: PhantomData<core::cell::UnsafeCell<&'a ()>>,
 }
 
 #[allow(clippy::missing_safety_doc)]
-impl<'a, const C: usize, N, W, S> Executor<'a, C, N, W, S>
+impl<'a, const C: usize, M, S> Executor<'a, C, M, S>
 where
-    N: NotifyFactory + RunContextFactory,
+    M: Monitor,
 {
     pub fn new() -> Self
     where
-        N: Default,
-        W: Default,
+        M: Default,
     {
-        Self::wrap(Default::default(), Default::default())
+        Self::wrap(Default::default())
     }
 
-    pub fn wrap(notify_factory: N, wait: W) -> Self {
+    pub fn wrap(monitor: M) -> Self {
         Self {
             #[cfg(feature = "crossbeam-queue")]
             queue: Arc::new(crossbeam_queue::ArrayQueue::new(C)),
             #[cfg(not(feature = "crossbeam-queue"))]
             queue: Arc::new(heapless::mpmc::MpMcQueue::<_, C>::new()),
-            notify_factory,
-            wait,
+            monitor,
             _sendable: PhantomData,
             _marker: PhantomData,
         }
     }
 
-    pub fn spawn_detached<F, T>(&mut self, fut: F) -> Result<&mut Self, SpawnError>
+    pub fn spawn_detached<F, T>(&self, fut: F) -> Result<&Self, SpawnError>
     where
         F: Future<Output = T> + Send + 'a,
         T: 'a,
@@ -133,10 +124,10 @@ where
     }
 
     pub fn spawn_collect<F, T>(
-        &mut self,
+        &self,
         fut: F,
         collector: &mut heapless::Vec<Task<T>, C>,
-    ) -> Result<&mut Self, SpawnError>
+    ) -> Result<&Self, SpawnError>
     where
         F: Future<Output = T> + Send + 'a,
         T: 'a,
@@ -150,7 +141,7 @@ where
         Ok(self)
     }
 
-    pub fn spawn<F, T>(&mut self, fut: F) -> Result<Task<T>, SpawnError>
+    pub fn spawn<F, T>(&self, fut: F) -> Result<Task<T>, SpawnError>
     where
         F: Future<Output = T> + Send + 'a,
         T: 'a,
@@ -158,13 +149,13 @@ where
         unsafe { self.spawn_unchecked(fut) }
     }
 
-    pub unsafe fn spawn_unchecked<F, T>(&mut self, fut: F) -> Result<Task<T>, SpawnError>
+    pub unsafe fn spawn_unchecked<F, T>(&self, fut: F) -> Result<Task<T>, SpawnError>
     where
         F: Future<Output = T>,
     {
         let schedule = {
             let queue = self.queue.clone();
-            let notify = self.notify_factory.notifier();
+            let notify = self.monitor.notifier();
 
             move |runnable| {
                 #[cfg(feature = "crossbeam-queue")]
@@ -188,20 +179,7 @@ where
         Ok(task)
     }
 
-    pub fn with_context<F, T>(&mut self, run: F) -> T
-    where
-        F: FnOnce(&mut Self, &RunContext) -> T,
-    {
-        self.notify_factory.prerun();
-
-        let result = run(self, &RunContext(()));
-
-        self.notify_factory.postrun();
-
-        result
-    }
-
-    pub fn run_one_scheduled(&mut self, _context: &RunContext) -> bool {
+    pub fn poll_one(&self) -> Poll<()> {
         let runnable;
 
         #[cfg(feature = "crossbeam-queue")]
@@ -217,64 +195,82 @@ where
         if let Some(runnable) = runnable {
             runnable.run();
 
-            true
+            Poll::Ready(())
         } else {
-            false
+            Poll::Pending
         }
     }
 
-    pub fn run_all_scheduled<B>(&mut self, context: &RunContext, condition: B) -> bool
+    pub fn poll<B>(&self, condition: B) -> Poll<()>
     where
         B: Fn() -> bool,
     {
         while condition() {
-            if !self.run_one_scheduled(context) {
-                return true;
+            if self.poll_one().is_pending() {
+                return Poll::Pending;
             }
         }
 
-        false
+        Poll::Ready(())
     }
 
-    pub fn run<B>(&mut self, context: &RunContext, condition: B)
+    pub fn drop_tasks<T>(&self, tasks: T) {
+        drop(tasks);
+
+        while !self.poll_one().is_pending() {}
+    }
+
+    pub fn start<B, F>(&'static self, condition: B, finished: F)
     where
-        W: Wait,
+        M: Start,
+        B: Fn() -> bool + 'static,
+        F: Fn() + 'static,
+    {
+        let executor = self;
+
+        self.monitor.start(move || {
+            if executor.poll(&condition).is_ready() {
+                finished();
+            }
+        });
+    }
+
+    // Methods below only work when a `Wait` implementation is provided
+    // (i.e. the executor runs in a thread)
+
+    pub fn run<B>(&self, condition: B)
+    where
+        M: Wait,
         B: Fn() -> bool,
     {
-        while self.run_all_scheduled(context, &condition) {
-            self.wait(context);
+        while self.poll(&condition).is_pending() {
+            self.wait();
         }
     }
 
-    pub fn run_tasks<B, T>(&mut self, context: &RunContext, condition: B, tasks: T)
+    pub fn run_tasks<B, T>(&self, condition: B, tasks: T)
     where
-        W: Wait,
+        M: Wait,
         B: Fn() -> bool,
     {
-        self.run(context, condition);
+        self.run(condition);
 
-        self.drop_tasks(context, tasks)
+        self.drop_tasks(tasks)
     }
 
-    pub fn drop_tasks<T>(&mut self, context: &RunContext, tasks: T) {
-        drop(tasks);
-
-        while self.run_one_scheduled(context) {}
-    }
-
-    pub fn wait(&mut self, _context: &RunContext)
+    pub fn wait(&self)
     where
-        W: Wait,
+        M: Wait,
     {
-        self.wait.wait();
+        self.monitor.wait();
     }
 }
 
-impl<'a, const C: usize, N, W> Executor<'a, C, N, W, Local>
+impl<'a, const C: usize, M> Executor<'a, C, M, Local>
 where
-    N: NotifyFactory + RunContextFactory,
+    M: Monitor,
 {
-    pub fn spawn_local_detached<F, T>(&mut self, fut: F) -> Result<&mut Self, SpawnError>
+    pub fn spawn_local_detached<F, T>(&self, fut: F) -> Result<&Self, SpawnError>
     where
         F: Future<Output = T> + 'a,
         T: 'a,
@@ -285,10 +281,10 @@ where
     }
 
     pub fn spawn_local_collect<F, T>(
-        &mut self,
+        &self,
         fut: F,
         collector: &mut heapless::Vec<Task<T>, C>,
-    ) -> Result<&mut Self, SpawnError>
+    ) -> Result<&Self, SpawnError>
     where
         F: Future<Output = T> + 'a,
         T: 'a,
@@ -302,7 +298,7 @@ where
         Ok(self)
     }
 
-    pub fn spawn_local<F, T>(&mut self, fut: F) -> Result<Task<T>, SpawnError>
+    pub fn spawn_local<F, T>(&self, fut: F) -> Result<Task<T>, SpawnError>
     where
         F: Future<Output = T> + 'a,
         T: 'a,
@@ -311,10 +307,9 @@ where
     }
 }
 
-impl<'a, const C: usize, N, W, S> Default for Executor<'a, C, N, W, S>
+impl<'a, const C: usize, M, S> Default for Executor<'a, C, M, S>
 where
-    N: NotifyFactory + RunContextFactory + Default,
-    W: Default,
+    M: Monitor + Default,
 {
     fn default() -> Self {
         Self::new()
@@ -322,24 +317,22 @@ where
 }
 
 #[derive(Clone)]
-pub struct Blocker<N, W>(N, W);
+pub struct Blocker<M>(M);
 
-impl<N, W> Blocker<N, W>
+impl<M> Blocker<M>
 where
-    N: NotifyFactory,
-    N::Notify: 'static,
-    W: Wait,
+    M: Monitor + Wait,
+    M::Notify: Send + Sync + 'static,
 {
     pub fn new() -> Self
     where
-        N: Default,
-        W: Default,
+        M: Default,
     {
-        Self(Default::default(), Default::default())
+        Self(Default::default())
     }
 
-    pub const fn wrap(notify_factory: N, wait: W) -> Self {
-        Self(notify_factory, wait)
+    pub const fn wrap(notify_factory: M) -> Self {
+        Self(notify_factory)
     }
 
     pub fn block_on<F>(&self, mut f: F) -> F::Output
@@ -364,16 +357,15 @@ where
                 return t;
             }
 
-            self.1.wait();
+            self.0.wait();
         }
     }
 }
 
-impl<N, W> Default for Blocker<N, W>
+impl<M> Default for Blocker<M>
 where
-    N: NotifyFactory + Default,
-    N::Notify: 'static,
-    W: Wait + Default,
+    M: Monitor + Wait + Default,
+    M::Notify: Send + Sync + 'static,
 {
     fn default() -> Self {
         Self::new()
@@ -381,11 +373,10 @@ where
 }
 
 #[cfg(feature = "embedded-svc")]
-impl<N, W> embedded_svc::executor::asynch::Blocker for Blocker<N, W>
+impl<M> embedded_svc::executor::asynch::Blocker for Blocker<M>
 where
-    N: NotifyFactory,
-    N::Notify: 'static,
-    W: Wait,
+    M: Monitor + Wait,
+    M::Notify: Send + Sync + 'static,
 {
     fn block_on<F>(&self, f: F) -> F::Output
     where
@@ -400,47 +391,90 @@ mod std {
     use std::sync::{Condvar, Mutex};
 
     extern crate alloc;
-    use alloc::{rc::Rc, sync::Arc};
+    use alloc::sync::Arc;
 
-    use crate::{Notify, NotifyFactory, RunContextFactory, Wait};
+    use crate::{Monitor, Notify, Wait};
 
-    #[derive(Clone)]
-    pub struct StdWait(Rc<Mutex<()>>, Arc<Condvar>);
-
-    impl StdWait {
-        pub fn new() -> Self {
-            Self(Rc::new(Mutex::new(())), Arc::new(Condvar::new()))
-        }
-
-        pub fn notify_factory(&self) -> Arc<Condvar> {
-            self.1.clone()
+    impl Notify for Arc<Condvar> {
+        fn notify(&self) {
+            self.notify_one();
         }
     }
 
-    impl Default for StdWait {
+    pub struct StdMonitor(Mutex<()>, Arc<Condvar>);
+
+    impl StdMonitor {
+        pub fn new() -> Self {
+            Self(Mutex::new(()), Arc::new(Condvar::new()))
+        }
+    }
+
+    impl Default for StdMonitor {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl Wait for StdWait {
+    impl Monitor for StdMonitor {
+        type Notify = Arc<Condvar>;
+
+        fn notifier(&self) -> Self::Notify {
+            self.1.clone()
+        }
+    }
+
+    impl Wait for StdMonitor {
         fn wait(&self) {
             let guard = self.0.lock().unwrap();
 
             drop(self.1.wait(guard).unwrap());
         }
     }
+}
 
-    #[derive(Default, Clone)]
-    pub struct StdNotifyFactory(Arc<Condvar>);
+#[cfg(feature = "wasm")]
+mod wasm {
+    use core::cell::RefCell;
 
-    impl StdNotifyFactory {
+    extern crate alloc;
+    use alloc::rc::Rc;
+
+    use js_sys::Promise;
+
+    use wasm_bindgen::prelude::*;
+
+    use crate::{Monitor, Notify, Start};
+
+    struct WasmContext {
+        promise: Promise,
+        closure: Closure<dyn FnMut(JsValue)>,
+    }
+
+    impl WasmContext {
         pub fn new() -> Self {
-            Self(Arc::new(Condvar::new()))
+            Self {
+                promise: Promise::resolve(&JsValue::undefined()),
+                closure: Closure::new(move |_| {}),
+            }
         }
     }
 
-    impl NotifyFactory for StdNotifyFactory {
+    #[derive(Clone)]
+    pub struct WasmMonitor(Rc<RefCell<WasmContext>>);
+
+    impl WasmMonitor {
+        pub fn new() -> Self {
+            Self(Rc::new(RefCell::new(WasmContext::new())))
+        }
+    }
+
+    impl Default for WasmMonitor {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Monitor for WasmMonitor {
         type Notify = Self;
 
         fn notifier(&self) -> Self::Notify {
@@ -448,11 +482,20 @@ mod std {
         }
     }
 
-    impl RunContextFactory for StdNotifyFactory {}
-
-    impl Notify for StdNotifyFactory {
+    impl Notify for WasmMonitor {
         fn notify(&self) {
-            self.0.notify_one();
+            let ctx = self.0.borrow_mut();
+
+            let _ = ctx.promise.then(&ctx.closure);
+        }
+    }
+
+    impl Start for WasmMonitor {
+        fn start<P>(&self, poll_fn: P)
+        where
+            P: Fn() + 'static,
+        {
+            self.0.borrow_mut().closure = Closure::new(move |_| poll_fn());
         }
     }
 }
