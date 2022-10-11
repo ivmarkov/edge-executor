@@ -27,7 +27,9 @@ jobs:
         run: rustup default ${{ env.rust_toolchain }}
       - name: Build | Fmt Check
         run: cargo fmt -- --check
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
       - name: Build | Clippy
-        run: cargo clippy --no-deps -- -Dwarnings
+        run: cargo clippy --features std,wasm --no-deps -- -Dwarnings
       - name: Build | Compile
         run: cargo build
