@@ -437,7 +437,7 @@ mod wasm {
     use core::cell::RefCell;
 
     extern crate alloc;
-    use alloc::rc::Rc;
+    use alloc::rc::{Rc, Weak};
 
     use js_sys::Promise;
 
@@ -445,16 +445,16 @@ mod wasm {
 
     use crate::{Monitor, Notify, Start};
 
-    struct WasmContext {
+    pub struct WasmContext {
         promise: Promise,
-        closure: Closure<dyn FnMut(JsValue)>,
+        closure: Option<Closure<dyn FnMut(JsValue)>>,
     }
 
     impl WasmContext {
         pub fn new() -> Self {
             Self {
                 promise: Promise::resolve(&JsValue::undefined()),
-                closure: Closure::new(move |_| {}),
+                closure: None,
             }
         }
     }
@@ -475,18 +475,22 @@ mod wasm {
     }
 
     impl Monitor for WasmMonitor {
-        type Notify = Self;
+        type Notify = Weak<RefCell<WasmContext>>;
 
         fn notifier(&self) -> Self::Notify {
-            self.clone()
+            Rc::downgrade(&self.0)
         }
     }
 
-    impl Notify for WasmMonitor {
+    impl Notify for Weak<RefCell<WasmContext>> {
         fn notify(&self) {
-            let ctx = self.0.borrow_mut();
+            if let Some(rc) = Weak::upgrade(self) {
+                let ctx = rc.borrow_mut();
 
-            let _ = ctx.promise.then(&ctx.closure);
+                if let Some(closure) = ctx.closure.as_ref() {
+                    let _ = ctx.promise.then(&closure);
+                }
+            }
         }
     }
 
@@ -495,7 +499,11 @@ mod wasm {
         where
             P: Fn() + 'static,
         {
-            self.0.borrow_mut().closure = Closure::new(move |_| poll_fn());
+            {
+                self.0.borrow_mut().closure = Some(Closure::new(move |_| poll_fn()));
+            }
+
+            self.notifier().notify();
         }
     }
 }
