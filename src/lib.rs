@@ -3,6 +3,7 @@
 use core::fmt;
 use core::future::Future;
 use core::marker::PhantomData;
+use core::mem;
 use core::task::{Context, Poll};
 
 extern crate alloc;
@@ -53,7 +54,7 @@ pub trait Wait {
 pub trait Start {
     fn start<P>(&self, poll_fn: P)
     where
-        P: Fn() + 'static;
+        P: FnMut() + 'static;
 }
 
 pub type Local = *const ();
@@ -224,13 +225,18 @@ where
     where
         M: Start,
         B: Fn() -> bool + 'static,
-        F: Fn() + 'static,
+        F: FnOnce() + 'static,
     {
         let executor = self;
+        let mut finished_opt = Some(finished);
 
         self.monitor.start(move || {
             if executor.poll(&condition).is_ready() {
-                finished();
+                if let Some(finished) = mem::replace(&mut finished_opt, None) {
+                    finished();
+                } else {
+                    unreachable!("Should not happen - finished called twice");
+                }
             }
         });
     }
@@ -495,9 +501,9 @@ mod wasm {
     }
 
     impl Start for WasmMonitor {
-        fn start<P>(&self, poll_fn: P)
+        fn start<P>(&self, mut poll_fn: P)
         where
-            P: Fn() + 'static,
+            P: FnMut() + 'static,
         {
             {
                 self.0.borrow_mut().closure = Some(Closure::new(move |_| poll_fn()));
