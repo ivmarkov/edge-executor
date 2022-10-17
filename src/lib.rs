@@ -3,7 +3,6 @@
 use core::fmt;
 use core::future::Future;
 use core::marker::PhantomData;
-use core::mem;
 use core::task::{Context, Poll};
 
 extern crate alloc;
@@ -221,6 +220,9 @@ where
         while !self.poll_one().is_pending() {}
     }
 
+    // Method below only works when a `Start` implementation is provided
+    // (i.e. the executor runs in the background, in an ISR context or in the WASM event loop)
+
     pub fn start<B, F>(&'static self, condition: B, finished: F)
     where
         M: Start,
@@ -232,7 +234,7 @@ where
 
         self.monitor.start(move || {
             if executor.poll(&condition).is_ready() {
-                if let Some(finished) = mem::replace(&mut finished_opt, None) {
+                if let Some(finished) = finished_opt.take() {
                     finished();
                 } else {
                     unreachable!("Should not happen - finished called twice");
@@ -401,12 +403,6 @@ mod std {
 
     use crate::{Monitor, Notify, Wait};
 
-    impl Notify for Arc<Condvar> {
-        fn notify(&self) {
-            self.notify_one();
-        }
-    }
-
     pub struct StdMonitor(Mutex<()>, Arc<Condvar>);
 
     impl StdMonitor {
@@ -422,10 +418,10 @@ mod std {
     }
 
     impl Monitor for StdMonitor {
-        type Notify = Arc<Condvar>;
+        type Notify = StdNotify;
 
         fn notifier(&self) -> Self::Notify {
-            self.1.clone()
+            StdNotify(self.1.clone())
         }
     }
 
@@ -434,6 +430,14 @@ mod std {
             let guard = self.0.lock().unwrap();
 
             drop(self.1.wait(guard).unwrap());
+        }
+    }
+
+    pub struct StdNotify(Arc<Condvar>);
+
+    impl Notify for StdNotify {
+        fn notify(&self) {
+            self.0.notify_one();
         }
     }
 }
@@ -451,26 +455,19 @@ mod wasm {
 
     use crate::{Monitor, Notify, Start};
 
-    pub struct WasmContext {
+    struct WasmContext {
         promise: Promise,
         closure: Option<Closure<dyn FnMut(JsValue)>>,
     }
 
-    impl WasmContext {
-        pub fn new() -> Self {
-            Self {
-                promise: Promise::resolve(&JsValue::undefined()),
-                closure: None,
-            }
-        }
-    }
-
-    #[derive(Clone)]
     pub struct WasmMonitor(Rc<RefCell<WasmContext>>);
 
     impl WasmMonitor {
         pub fn new() -> Self {
-            Self(Rc::new(RefCell::new(WasmContext::new())))
+            Self(Rc::new(RefCell::new(WasmContext {
+                promise: Promise::resolve(&JsValue::undefined()),
+                closure: None,
+            })))
         }
     }
 
@@ -481,22 +478,10 @@ mod wasm {
     }
 
     impl Monitor for WasmMonitor {
-        type Notify = Weak<RefCell<WasmContext>>;
+        type Notify = WasmNotify;
 
         fn notifier(&self) -> Self::Notify {
-            Rc::downgrade(&self.0)
-        }
-    }
-
-    impl Notify for Weak<RefCell<WasmContext>> {
-        fn notify(&self) {
-            if let Some(rc) = Weak::upgrade(self) {
-                let ctx = rc.borrow_mut();
-
-                if let Some(closure) = ctx.closure.as_ref() {
-                    let _ = ctx.promise.then(&closure);
-                }
-            }
+            WasmNotify(Rc::downgrade(&self.0))
         }
     }
 
@@ -510,6 +495,20 @@ mod wasm {
             }
 
             self.notifier().notify();
+        }
+    }
+
+    pub struct WasmNotify(Weak<RefCell<WasmContext>>);
+
+    impl Notify for WasmNotify {
+        fn notify(&self) {
+            if let Some(rc) = Weak::upgrade(&self.0) {
+                let ctx = rc.borrow_mut();
+
+                if let Some(closure) = ctx.closure.as_ref() {
+                    let _ = ctx.promise.then(&closure);
+                }
+            }
         }
     }
 }
