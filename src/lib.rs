@@ -399,7 +399,7 @@ mod std {
     use std::sync::{Condvar, Mutex};
 
     extern crate alloc;
-    use alloc::sync::Arc;
+    use alloc::sync::{Arc, Weak};
 
     use crate::{Monitor, Notify, Wait};
 
@@ -421,7 +421,7 @@ mod std {
         type Notify = StdNotify;
 
         fn notifier(&self) -> Self::Notify {
-            StdNotify(self.1.clone())
+            StdNotify(Arc::downgrade(&self.1))
         }
     }
 
@@ -433,11 +433,13 @@ mod std {
         }
     }
 
-    pub struct StdNotify(Arc<Condvar>);
+    pub struct StdNotify(Weak<Condvar>);
 
     impl Notify for StdNotify {
         fn notify(&self) {
-            self.0.notify_one();
+            if let Some(notify) = Weak::upgrade(&self.0) {
+                notify.notify_one();
+            }
         }
     }
 }
