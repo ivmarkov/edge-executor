@@ -13,7 +13,8 @@ readme = "README.md"
 
 [features]
 default = ["std", "crossbeam-queue"]
-std = ["embedded-svc?/std"]
+std = []
+#std = ["embedded-svc?/std"]
 wasm = ["wasm-bindgen", "js-sys"]
 
 [dependencies]
@@ -23,7 +24,7 @@ async-task = { version = "4", default-features = false }
 waker-fn = { version = "1.1", default-features = false }
 log = { version = "0.4", default-features = false }
 #embedded-svc = { version = "0.23", default-features = false, optional = true, default-features = false, features = ["experimental"] }
-embedded-svc = { version = "0.23", git = "https://github.com/esp-rs/embedded-svc", optional = true, default-features = false, features = ["experimental"] }
+#embedded-svc = { version = "0.23", git = "https://github.com/esp-rs/embedded-svc", optional = true, default-features = false, features = ["experimental"] }
 
 # WASM dependencies
 wasm-bindgen = { version = "0.2.82", optional = true }

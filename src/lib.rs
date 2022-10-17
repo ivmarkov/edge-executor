@@ -380,19 +380,19 @@ where
     }
 }
 
-#[cfg(feature = "embedded-svc")]
-impl<M> embedded_svc::executor::asynch::Blocker for Blocker<M>
-where
-    M: Monitor + Wait,
-    M::Notify: Send + Sync + 'static,
-{
-    fn block_on<F>(&self, f: F) -> F::Output
-    where
-        F: Future,
-    {
-        Blocker::block_on(self, f)
-    }
-}
+// #[cfg(feature = "embedded-svc")]
+// impl<M> embedded_svc::executor::asynch::Blocker for Blocker<M>
+// where
+//     M: Monitor + Wait,
+//     M::Notify: Send + Sync + 'static,
+// {
+//     fn block_on<F>(&self, f: F) -> F::Output
+//     where
+//         F: Future,
+//     {
+//         Blocker::block_on(self, f)
+//     }
+// }
 
 #[cfg(feature = "std")]
 mod std {
