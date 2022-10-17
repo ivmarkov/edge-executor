@@ -506,7 +506,7 @@ mod wasm {
                 let ctx = rc.borrow_mut();
 
                 if let Some(closure) = ctx.closure.as_ref() {
-                    let _ = ctx.promise.then(&closure);
+                    let _ = ctx.promise.then(closure);
                 }
             }
         }
