@@ -1,6 +1,7 @@
 # edge-executor
 
 [![CI](https://github.com/ivmarkov/edge-executor/actions/workflows/ci.yml/badge.svg)](https://github.com/ivmarkov/edge-executor/actions/workflows/ci.yml)
+![crates.io](https://img.shields.io/crates/v/edge-executor.svg)
 [![Documentation](https://docs.rs/edge-executor/badge.svg)](https://docs.rs/edge-executor)
 
 This crate ships a minimal async executor suitable for embedded environments.
