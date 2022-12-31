@@ -13,9 +13,11 @@ readme = "README.md"
 
 [features]
 default = ["std", "crossbeam-queue"]
-std = []
-#std = ["embedded-svc?/std"]
-wasm = ["wasm-bindgen", "js-sys"]
+std = ["alloc"]
+#std = ["alloc", "embedded-svc?/std"]
+alloc = []
+#alloc = ["embedded-svc?/alloc"]
+wasm = ["std", "wasm-bindgen", "js-sys"]
 
 [dependencies]
 heapless = { version = "0.7" }

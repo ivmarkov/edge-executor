@@ -15,6 +15,9 @@ pub use async_task::Task;
 #[cfg(feature = "std")]
 pub use crate::std::*;
 
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "8"))]
+pub use crate::eventloop::*;
+
 #[cfg(feature = "wasm")]
 pub use crate::wasm::*;
 
@@ -509,6 +512,87 @@ mod wasm {
 
                 if let Some(closure) = ctx.closure.as_ref() {
                     let _ = ctx.promise.then(closure);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "8"))]
+mod eventloop {
+    use core::cell::UnsafeCell;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    extern crate alloc;
+    use alloc::boxed::Box;
+    use alloc::sync::{Arc, Weak};
+
+    use crate::{Monitor, Notify, Start};
+
+    struct EventLoopContext {
+        scheduler: Box<dyn Fn(extern "C" fn(*mut ()), *mut ())>,
+        scheduled: AtomicBool,
+        poller: UnsafeCell<Option<Box<dyn FnMut()>>>,
+    }
+
+    pub struct EventLoopMonitor(Arc<EventLoopContext>);
+
+    impl EventLoopMonitor {
+        pub fn new<S>(scheduler: S) -> Self
+        where
+            S: Fn(extern "C" fn(*mut ()), *mut ()) + 'static,
+        {
+            Self(Arc::new(EventLoopContext {
+                scheduler: Box::new(scheduler),
+                scheduled: AtomicBool::new(false),
+                poller: UnsafeCell::new(None),
+            }))
+        }
+    }
+
+    impl Monitor for EventLoopMonitor {
+        type Notify = EventLoopNotify;
+
+        fn notifier(&self) -> Self::Notify {
+            EventLoopNotify(Arc::downgrade(&self.0))
+        }
+    }
+
+    impl Start for EventLoopMonitor {
+        fn start<P>(&self, poll_fn: P)
+        where
+            P: FnMut() + 'static,
+        {
+            {
+                *unsafe { self.0.poller.get().as_mut() }.unwrap() = Some(Box::new(poll_fn));
+            }
+
+            self.notifier().notify();
+        }
+    }
+
+    pub struct EventLoopNotify(Weak<EventLoopContext>);
+
+    impl EventLoopNotify {
+        extern "C" fn run(ctx: *mut ()) {
+            let ctx = unsafe { Arc::from_raw(ctx as *const EventLoopContext) };
+
+            ctx.scheduled.store(false, Ordering::SeqCst);
+
+            if let Some(poll_fn) = unsafe { ctx.poller.get().as_mut() }.unwrap().as_mut() {
+                poll_fn();
+            }
+        }
+    }
+
+    impl Notify for EventLoopNotify {
+        fn notify(&self) {
+            if let Some(ctx) = Weak::upgrade(&self.0) {
+                if let Ok(false) =
+                    ctx.scheduled
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                {
+                    (ctx.scheduler)(Self::run, Arc::into_raw(ctx.clone()) as *mut _);
                 }
             }
         }
