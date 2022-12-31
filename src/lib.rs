@@ -521,6 +521,7 @@ mod wasm {
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "8"))]
 mod eventloop {
     use core::cell::UnsafeCell;
+    use core::marker::PhantomData;
     use core::sync::atomic::{AtomicBool, Ordering};
 
     extern crate alloc;
@@ -535,18 +536,21 @@ mod eventloop {
         poller: UnsafeCell<Option<Box<dyn FnMut()>>>,
     }
 
-    pub struct EventLoopMonitor(Arc<EventLoopContext>);
+    pub struct EventLoopMonitor(Arc<EventLoopContext>, PhantomData<*const ()>);
 
     impl EventLoopMonitor {
         pub fn new<S>(scheduler: S) -> Self
         where
             S: Fn(extern "C" fn(*mut ()), *mut ()) + 'static,
         {
-            Self(Arc::new(EventLoopContext {
-                scheduler: Box::new(scheduler),
-                scheduled: AtomicBool::new(false),
-                poller: UnsafeCell::new(None),
-            }))
+            Self(
+                Arc::new(EventLoopContext {
+                    scheduler: Box::new(scheduler),
+                    scheduled: AtomicBool::new(false),
+                    poller: UnsafeCell::new(None),
+                }),
+                PhantomData,
+            )
         }
     }
 
