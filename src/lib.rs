@@ -596,6 +596,7 @@ mod eventloop {
                     ctx.scheduled
                         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 {
+                    // TODO: Will leak the Arc if the scheduled event is not executed
                     (ctx.scheduler)(Self::run, Arc::into_raw(ctx.clone()) as *mut _);
                 }
             }
