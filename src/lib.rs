@@ -62,7 +62,6 @@ pub trait Start {
 pub type Local = *const ();
 pub type Sendable = ();
 
-/// WORK IN PROGRESS
 /// `Executor` is an async executor that is useful specfically for embedded environments.
 ///
 /// The implementation is in fact a thin wrapper around [smol](::smol)'s [async-task](::async-task) crate.
