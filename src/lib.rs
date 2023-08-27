@@ -8,9 +8,7 @@ use core::task::{Context, Poll};
 extern crate alloc;
 use alloc::sync::Arc;
 
-use async_task::Runnable;
-
-pub use async_task::Task;
+pub use async_task::{Runnable, Task};
 
 #[cfg(feature = "std")]
 pub use crate::std::*;
@@ -259,12 +257,19 @@ where
         Ok(task)
     }
 
-    /// Polls the executor once and thus runs one task from those which had been scheduled to run by their wakers.
+    /// Pops the first task scheduled for execution by the executor.
+    ///
+    /// Typically useful when the executor works in a work-stealing mode,
+    /// i.e. tasks are executed on a thread pool.
+    ///
+    /// For single-threaded execution, `poll`, `poll_one` are easier alternatives as they
+    /// abstract popping and running the scheduled tasks.
     ///
     /// Returns
-    /// `Poll::Pending` if no tasks had been scheduled for execution.
-    /// `Poll::Ready<()>` if at least one task was scheduled for execution and executed.
-    pub fn poll_one(&self) -> Poll<()> {
+    /// - `None` - if no task was scheduled for execution
+    /// - `Some(Runnnable)` - the first task scheduled for execution. Calling `Runnable::run` will
+    ///    execute the task. In other words, it will poll its future.
+    pub fn pop_scheduled(&self) -> Option<Runnable> {
         let runnable;
 
         #[cfg(feature = "crossbeam-queue")]
@@ -277,7 +282,16 @@ where
             runnable = self.queue.dequeue();
         }
 
-        if let Some(runnable) = runnable {
+        runnable
+    }
+
+    /// Polls the executor once and thus runs one task from those which had been scheduled to run by their wakers.
+    ///
+    /// Returns
+    /// `Poll::Pending` if no tasks had been scheduled for execution.
+    /// `Poll::Ready<()>` if at least one task was scheduled for execution and executed.
+    pub fn poll_one(&self) -> Poll<()> {
+        if let Some(runnable) = self.pop_scheduled() {
             runnable.run();
 
             Poll::Ready(())
