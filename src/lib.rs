@@ -39,27 +39,79 @@ impl fmt::Display for SpawnError {
 #[cfg(feature = "std")]
 impl ::std::error::Error for SpawnError {}
 
-pub trait Notify {
-    fn notify(&self);
-}
-
+/// This trait captures the notion of an executor wakeup
+/// that needs to happen once a waker is awoken using `Waker::wake()`.
+///
+/// The implementation of the trait is operating system and
+/// execution approach-specific. Some examples:
+/// - On most operating systems with STD support, the `Monitor` implementation
+///   is a (Mutex, Condvar) pair, which allows the executor to block/sleep on the mutex
+///   when there there are no tasks pending for execution, and to be awoken
+///   (via the condvar), when `wake()` is called on some waker.
+/// - For event-loop based execution, the monitor implementation typically schedules
+///   the executor to run the currently scheduled tasks on the event loop.
+///   When there are no tasks scheduled for execution, the executor does not "sleep"
+///   per-se, as it does not have a dedicated thread. Yet, it simply doesn't get scheduled
+///   for execution on the event-loop.
 pub trait Monitor {
     type Notify: Notify;
 
     fn notifier(&self) -> Self::Notify;
 }
 
-pub trait Wait {
+/// The `Monitor` trait is also essentially a factory
+/// producing - on demand - instances of this trait.
+///
+/// This trait is performing the actual scheduling of the executor for execution
+/// - as in by e.g. awaking the thread of the executor, or e.g. scheduling the executor on an event loop.
+pub trait Notify {
+    fn notify(&self);
+}
+
+/// Monitors that provide a "sleep" facility to the executor need to also
+/// implement this trait. Most monitors should typically implement it, which enables
+/// the `Executor::run` method.
+///
+/// What `Executor::run` does is to - in a loop - call `wait()` on the monitor.
+/// Once awoken from `wait()` (which means a waker was awoken via a call to `Notifier::notify()`),
+/// the executor runs all tasks which had been scheduled to run by their awoken wakers.
+/// Once the scheduled tasks' queue is empty again, the executor calls `wait()` again.
+///
+/// Notable exceptions are event-loop based monitors like WASM and others
+/// where the executor is started once (via `Executor::start`) and then
+/// scheduled for execution on the event loop when notified.
+pub trait Wait: Monitor {
     fn wait(&self);
 }
 
-pub trait Start {
+/// An alternative to `Wait` that is typically implemented for executors that
+/// are scheduled on an event-loop and thus do NOT follow the
+/// "sleep the executor current thread until notified and then run the executor in the thread"
+/// pattern, achieved by implementing the `Wait` trait.
+///
+/// Enables the `Executor::start` method.
+pub trait Start: Monitor {
     fn start<P>(&self, poll_fn: P)
     where
         P: FnMut() + 'static;
 }
 
+/// Designates a `Local` executor.
+///
+/// Local executors can be polled and thus execute their tasks from a single thread only,
+/// so task parallelism is not possible.
+///
+/// Yet, these executors have the benefit that futures spawned on them do not need to be `Send + 'static`
+/// and can live only as long as the executor lives.
 pub type Local = *const ();
+
+/// Designates a `Sendable` (i.e. work-stealing) executor.
+///
+/// Sendable executors can be polled from multiple threads and thus can execute their tasks
+/// in a parallel fashion from multiple threads, thus achieving task parallelism.
+///
+/// These executors require that the futures spawned on them are `Send + 'static`, as the futures
+/// might be moved to other threads different from the thread where they were spawned.
 pub type Sendable = ();
 
 /// `Executor` is an async executor that is useful specfically for embedded environments.
@@ -96,6 +148,8 @@ impl<'a, const C: usize, M, S> Executor<'a, C, M, S>
 where
     M: Monitor,
 {
+    /// Creates a new executor instance using the provided `Monitor` type.
+    /// The monitor type needs to implement `Default`.
     pub fn new() -> Self
     where
         M: Default,
@@ -103,6 +157,7 @@ where
         Self::wrap(Default::default())
     }
 
+    /// Creates a new executor instance using the provided `Monitor` instance.
     pub fn wrap(monitor: M) -> Self {
         Self {
             #[cfg(feature = "crossbeam-queue")]
@@ -115,6 +170,11 @@ where
         }
     }
 
+    /// Spawns a new, detached task for the supplied future.
+    ///
+    /// Note that if the executor's queue size is equal to the number of currently
+    /// spawned and running tasks, spawning this additional task might cause the executor to panic
+    /// later, when the task is scheduled for polling.
     pub fn spawn_detached<F, T>(&self, fut: F) -> Result<&Self, SpawnError>
     where
         F: Future<Output = T> + Send + 'a,
@@ -125,6 +185,11 @@ where
         Ok(self)
     }
 
+    /// Spawns a new task for the supplied future and collects it in the supplied `heapless::Vec` instance.
+    ///
+    /// Note that if the executor's queue size is equal to the number of currently
+    /// spawned and running tasks, spawning this additional task might cause the executor to panic
+    /// later, when the task is scheduled for polling.
     pub fn spawn_collect<F, T>(
         &self,
         fut: F,
@@ -134,15 +199,24 @@ where
         F: Future<Output = T> + Send + 'a,
         T: 'a,
     {
-        let task = self.spawn(fut)?;
+        if collector.len() < C {
+            let task = self.spawn(fut)?;
 
-        collector
-            .push(task)
-            .map_err(|_| SpawnError::CollectorFull)?;
+            collector
+                .push(task)
+                .map_err(|_| SpawnError::CollectorFull)?;
 
-        Ok(self)
+            Ok(self)
+        } else {
+            Err(SpawnError::CollectorFull)
+        }
     }
 
+    /// Spawns a new task for the supplied future.
+    ///
+    /// Note that if the executor's queue size is equal to the number of currently
+    /// spawned and running tasks, spawning this additional task might cause the executor to panic
+    /// later, when the task is scheduled for polling.
     pub fn spawn<F, T>(&self, fut: F) -> Result<Task<T>, SpawnError>
     where
         F: Future<Output = T> + Send + 'a,
@@ -151,6 +225,10 @@ where
         unsafe { self.spawn_unchecked(fut) }
     }
 
+    /// Unsafely spawns a new task for the supplied future.
+    ///
+    /// This method is unsafe because it is not checking whether the future lives as long
+    /// as the executor.
     pub unsafe fn spawn_unchecked<F, T>(&self, fut: F) -> Result<Task<T>, SpawnError>
     where
         F: Future<Output = T>,
@@ -181,6 +259,11 @@ where
         Ok(task)
     }
 
+    /// Polls the executor once and thus runs one task from those which had been scheduled to run by their wakers.
+    ///
+    /// Returns
+    /// `Poll::Pending` if no tasks had been scheduled for execution.
+    /// `Poll::Ready<()>` if at least one task was scheduled for execution and executed.
     pub fn poll_one(&self) -> Poll<()> {
         let runnable;
 
@@ -203,6 +286,12 @@ where
         }
     }
 
+    /// Polls the executor and runs all tasks which had been scheduled to run by their wakers.
+    /// Stops polling once `condition` becomes `false` OR when there are no more tasks scheduled for execution in the queue.
+    ///
+    /// Returns
+    /// `Poll::Pending` when all tasks (if any) in the queue had been executed
+    /// `Poll::Ready<()>` if `condition` became `false` in the meantime
     pub fn poll<B>(&self, condition: B) -> Poll<()>
     where
         B: Fn() -> bool,
@@ -216,15 +305,21 @@ where
         Poll::Ready(())
     }
 
+    /// Drops all supplied tasks. This method is necessary, because the tasks can only be dropped while the executor is running.
+    ///
+    /// As a side effect, tasks which had not been supplied for dropping will also run.
     pub fn drop_tasks<T>(&self, tasks: T) {
         drop(tasks);
 
         while !self.poll_one().is_pending() {}
     }
 
-    // Method below only works when a `Start` implementation is provided
-    // (i.e. the executor runs in the background, in an ISR context or in the WASM event loop)
-
+    /// Starts the executor in the background and runs it until `condition` holds `true`.
+    /// At the end of the execution, calls the `finished` callback.
+    ///
+    /// This method requires that the `Monitor` instance used by the executor implements the `Start` trait.
+    /// This trait is typically provided by monitors which allow embedding the executor in an event loop,
+    /// similar to the browser/WASM event loop.
     pub fn start<B, F>(&'static self, condition: B, finished: F)
     where
         M: Start,
@@ -245,9 +340,10 @@ where
         });
     }
 
-    // Methods below only work when a `Wait` implementation is provided
-    // (i.e. the executor runs in a thread)
-
+    /// Continuously runs the executor while `condition` holds `true`.
+    ///
+    /// This method requires that the `Monitor` instance used by the executor implements the `Wait` trait.
+    /// In other words, the monitor should be capable of providing "sleep" functionality to the executor.
     pub fn run<B>(&self, condition: B)
     where
         M: Wait,
@@ -258,6 +354,11 @@ where
         }
     }
 
+    /// Continuously runs the executor while `condition` holds `true`.
+    /// Once `condition` becomes `false`, drops all supplied tasks.
+    ///
+    /// This method requires that the `Monitor` instance used by the executor implements the `Wait` trait.
+    /// In other words, the monitor should be capable of providing "sleep" functionality to the executor.
     pub fn run_tasks<B, T>(&self, condition: B, tasks: T)
     where
         M: Wait,
@@ -268,6 +369,10 @@ where
         self.drop_tasks(tasks)
     }
 
+    /// Waits for one or more tasks to be scheduled for execution.
+    ///
+    /// This method requires that the `Monitor` instance used by the executor implements the `Wait` trait.
+    /// In other words, the monitor should be capable of providing "sleep" functionality to the executor.
     pub fn wait(&self)
     where
         M: Wait,
@@ -280,6 +385,11 @@ impl<'a, const C: usize, M> Executor<'a, C, M, Local>
 where
     M: Monitor,
 {
+    /// Spawns a new, detached task for the supplied future.
+    ///
+    /// Note that if the executor's queue size is equal to the number of currently
+    /// spawned and running tasks, spawning this additional task might cause the executor to panic
+    /// later, when the task is scheduled for polling.
     pub fn spawn_local_detached<F, T>(&self, fut: F) -> Result<&Self, SpawnError>
     where
         F: Future<Output = T> + 'a,
@@ -290,6 +400,11 @@ where
         Ok(self)
     }
 
+    /// Spawns a new task for the supplied future and collects it in the supplied `heapless::Vec` instance.
+    ///
+    /// Note that if the executor's queue size is equal to the number of currently
+    /// spawned and running tasks, spawning this additional task might cause the executor to panic
+    /// later, when the task is scheduled for polling.
     pub fn spawn_local_collect<F, T>(
         &self,
         fut: F,
@@ -308,6 +423,11 @@ where
         Ok(self)
     }
 
+    /// Spawns a new task for the supplied future.
+    ///
+    /// Note that if the executor's queue size is equal to the number of currently
+    /// spawned and running tasks, spawning this additional task might cause the executor to panic
+    /// later, when the task is scheduled for polling.
     pub fn spawn_local<F, T>(&self, fut: F) -> Result<Task<T>, SpawnError>
     where
         F: Future<Output = T> + 'a,
@@ -326,6 +446,7 @@ where
     }
 }
 
+/// A very simple executor that can execute - on the current thread - a single future.
 #[derive(Clone)]
 pub struct Blocker<M>(M);
 
@@ -334,6 +455,8 @@ where
     M: Monitor + Wait,
     M::Notify: Send + Sync + 'static,
 {
+    /// Creates a new executor instance using the provided `Monitor` type.
+    /// The monitor type needs to implement `Default`.
     pub fn new() -> Self
     where
         M: Default,
@@ -341,10 +464,12 @@ where
         Self(Default::default())
     }
 
+    /// Creates a new executor instance using the provided `Monitor` instance.
     pub const fn wrap(notify_factory: M) -> Self {
         Self(notify_factory)
     }
 
+    /// Executes the supplied future on the current thread, this blocking it until the future becomes ready.
     pub fn block_on<F>(&self, mut f: F) -> F::Output
     where
         F: Future,
@@ -405,6 +530,10 @@ mod std {
 
     use crate::{Monitor, Notify, Wait};
 
+    /// A `Monitor` instance based on `std::sync::Mutex` and `std::sync::Condvar`
+    /// Suitable for STD-compatible platforms where awaking a waker from an ISR
+    /// is either not an option (regular operating systems like Linux)
+    /// or not necessary.
     pub struct StdMonitor(Mutex<()>, Arc<Condvar>);
 
     impl StdMonitor {
@@ -464,6 +593,11 @@ mod wasm {
         closure: Option<Closure<dyn FnMut(JsValue)>>,
     }
 
+    /// A `Monitor` instance for web-assembly (WASM) based browser targets.
+    ///
+    /// Works by integrating the monitor (and thus the executor) into the browser event loop.
+    ///
+    /// Tasks are scheduled for execution in the browser event loop, by turning those into JavaScript Promises.
     pub struct WasmMonitor(Rc<RefCell<WasmContext>>);
 
     impl WasmMonitor {
@@ -535,6 +669,15 @@ mod eventloop {
         poller: UnsafeCell<Option<Box<dyn FnMut()>>>,
     }
 
+    unsafe impl Send for EventLoopContext {}
+    unsafe impl Sync for EventLoopContext {}
+
+    /// A generic `Monitor` instance useful for integrating into a native event loop, by scheduling
+    /// the execution of the tasks to happen in the event loop.
+    ///
+    /// Only event loops that provide a way to schedule a piece of "work" in the event loop are
+    /// amenable to such integration. Typical event loops include the GLIB event loop, the Matter
+    /// C++ SDK event loop, and possibly many others.
     pub struct EventLoopMonitor(Arc<EventLoopContext>, PhantomData<*const ()>);
 
     impl EventLoopMonitor {
