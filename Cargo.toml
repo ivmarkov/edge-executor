@@ -12,15 +12,15 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 
 [patch.crates-io]
-#esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal", branch = "all-executors" }
 esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys" }
-esp-idf-hal = { path = "../esp-idf-hal" }
+esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal", branch = "all-executors" }
 
 [features]
 default = ["std", "crossbeam-queue"]
 std = ["alloc"]
 alloc = ["esp-idf-hal?/alloc"]
 wasm = ["std", "wasm-bindgen", "js-sys"]
+esp-idf = ["esp-idf-hal"]
 
 [dependencies]
 heapless = { version = "0.7" }
@@ -30,7 +30,7 @@ waker-fn = { version = "1.1", default-features = false }
 log = { version = "0.4", default-features = false }
 
 # ESP-IDF dependencies
-esp-idf-hal = { version = "0.41", default-features = false, optional = true, features = ["native"] }
+esp-idf-hal = { version = "0.41", default-features = false, optional = true, features = ["wake-from-isr"] }
 
 # WASM dependencies
 wasm-bindgen = { version = "0.2.82", optional = true }
