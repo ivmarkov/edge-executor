@@ -11,12 +11,15 @@ repository = "https://github.com/ivmarkov/edge-executor"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 
+[patch.crates-io]
+#esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal", branch = "all-executors" }
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys" }
+esp-idf-hal = { path = "../esp-idf-hal" }
+
 [features]
 default = ["std", "crossbeam-queue"]
 std = ["alloc"]
-#std = ["alloc", "embedded-svc?/std"]
-alloc = []
-#alloc = ["embedded-svc?/alloc"]
+alloc = ["esp-idf-hal?/alloc"]
 wasm = ["std", "wasm-bindgen", "js-sys"]
 
 [dependencies]
@@ -25,8 +28,9 @@ crossbeam-queue = { version = "0.3", optional = true }
 async-task = { version = "4", default-features = false }
 waker-fn = { version = "1.1", default-features = false }
 log = { version = "0.4", default-features = false }
-#embedded-svc = { version = "0.23", default-features = false, optional = true, default-features = false, features = ["experimental"] }
-#embedded-svc = { version = "0.23", git = "https://github.com/esp-rs/embedded-svc", optional = true, default-features = false, features = ["experimental"] }
+
+# ESP-IDF dependencies
+esp-idf-hal = { version = "0.41", default-features = false, optional = true, features = ["native"] }
 
 # WASM dependencies
 wasm-bindgen = { version = "0.2.82", optional = true }
@@ -34,3 +38,6 @@ js-sys = { version = "0.3", optional = true }
 
 [dev-dependencies]
 simple_logger = "2.2"
+
+[build-dependencies]
+embuild = "0.31.2"

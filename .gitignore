@@ -1,3 +1,7 @@
 /dist
 /target
 Cargo.lock
+/.vscode
+/.espressif
+/.embuild
+**/*.rs.bk

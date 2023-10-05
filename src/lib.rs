@@ -16,6 +16,9 @@ pub use crate::std::*;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "8"))]
 pub use crate::eventloop::*;
 
+#[cfg(all(feature = "alloc", feature = "esp-idf-hal", target_has_atomic = "ptr"))]
+pub use crate::espidf::*;
+
 #[cfg(feature = "wasm")]
 pub use crate::wasm::*;
 
@@ -755,6 +758,43 @@ mod eventloop {
                     // TODO: Will leak the Arc if the scheduled event is not executed
                     (ctx.scheduler)(Self::run, Arc::into_raw(ctx.clone()) as *mut _);
                 }
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "alloc", feature = "esp-idf-hal", target_has_atomic = "ptr"))]
+mod espidf {
+    use core::num::NonZeroU32;
+
+    use esp_idf_hal::task::notification;
+
+    pub use super::*;
+
+    pub type EspExecutor<'a, const C: usize, S> = Executor<'a, C, FreeRtosMonitor, S>;
+    pub type EspBlocker = Blocker<FreeRtosMonitor>;
+
+    pub type FreeRtosMonitor = notification::Monitor;
+    pub type FreeRtosNotify = notification::Notifier;
+
+    impl Monitor for notification::Monitor {
+        type Notify = notification::Notifier;
+
+        fn notifier(&self) -> Self::Notify {
+            notification::Monitor::notifier(self)
+        }
+    }
+
+    impl Wait for notification::Monitor {
+        fn wait(&self) {
+            notification::Monitor::wait_any(self)
+        }
+    }
+
+    impl Notify for notification::Notifier {
+        fn notify(&self) {
+            unsafe {
+                notification::Notifier::notify_and_yield(self, NonZeroU32::new(1).unwrap());
             }
         }
     }
