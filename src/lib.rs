@@ -1,14 +1,21 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use core::fmt;
-use core::future::Future;
+use core::future::{poll_fn, Future};
 use core::marker::PhantomData;
-use core::task::{Context, Poll};
+use core::pin::pin;
+use core::task::{Context, Poll, Waker};
 
 extern crate alloc;
+
+use alloc::rc::Rc;
 use alloc::sync::Arc;
+use alloc::task::Wake;
 
 pub use async_task::{Runnable, Task};
+
+use atomic_waker::AtomicWaker;
+
+use futures_lite::FutureExt;
 
 #[cfg(feature = "std")]
 pub use crate::std::*;
@@ -16,200 +23,178 @@ pub use crate::std::*;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "8"))]
 pub use crate::eventloop::*;
 
-#[cfg(all(feature = "alloc", feature = "esp-idf-hal", target_has_atomic = "ptr"))]
+#[cfg(all(feature = "alloc", feature = "esp-idf", target_has_atomic = "ptr"))]
 pub use crate::espidf::*;
 
 #[cfg(feature = "wasm")]
 pub use crate::wasm::*;
-
-#[derive(Debug)]
-pub enum SpawnError {
-    QueueFull,
-    CollectorFull,
-}
-
-impl fmt::Display for SpawnError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::QueueFull => write!(f, "Queue Full Error"),
-            Self::CollectorFull => write!(f, "Collector Full Error"),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl ::std::error::Error for SpawnError {}
 
 /// This trait captures the notion of an executor wakeup
 /// that needs to happen once a waker is awoken using `Waker::wake()`.
 ///
 /// The implementation of the trait is operating system and
 /// execution approach-specific. Some examples:
-/// - On most operating systems with STD support, the `Monitor` implementation
+/// - On most operating systems with STD support, the `Wakeup` implementation
 ///   is a (Mutex, Condvar) pair, which allows the executor to block/sleep on the mutex
 ///   when there there are no tasks pending for execution, and to be awoken
-///   (via the condvar), when `wake()` is called on some waker.
+///   (via the condvar), when `wake()` is called on some task `Waker`.
 /// - For event-loop based execution, the monitor implementation typically schedules
 ///   the executor to run the currently scheduled tasks on the event loop.
 ///   When there are no tasks scheduled for execution, the executor does not "sleep"
 ///   per-se, as it does not have a dedicated thread. Yet, it simply doesn't get scheduled
 ///   for execution on the event-loop.
-pub trait Monitor {
-    type Notify: Notify;
+pub trait Wakeup {
+    type Wake: Wake + Send + Sync + 'static;
 
-    fn notifier(&self) -> Self::Notify;
+    fn waker(&self) -> Arc<Self::Wake>;
 }
 
-/// The `Monitor` trait is also essentially a factory
-/// producing - on demand - instances of this trait.
-///
-/// This trait is performing the actual scheduling of the executor for execution
-/// - as in by e.g. awaking the thread of the executor, or e.g. scheduling the executor on an event loop.
-pub trait Notify {
-    fn notify(&self);
+impl<T> Wakeup for &T
+where
+    T: Wakeup,
+{
+    type Wake = T::Wake;
+
+    fn waker(&self) -> Arc<Self::Wake> {
+        (*self).waker()
+    }
 }
 
-/// Monitors that provide a "sleep" facility to the executor need to also
-/// implement this trait. Most monitors should typically implement it, which enables
-/// the `Executor::run` method.
+impl<T> Wakeup for &mut T
+where
+    T: Wakeup,
+{
+    type Wake = T::Wake;
+
+    fn waker(&self) -> Arc<Self::Wake> {
+        (**self).waker()
+    }
+}
+
+/// `Wakeup` instances that provide a "sleep" facility to the executor need to also
+/// implement this trait. Most `Wakeup` implementations should typically implement it, which enables
+/// the `LocalExecutor::run` method.
 ///
-/// What `Executor::run` does is to - in a loop - call `wait()` on the monitor.
-/// Once awoken from `wait()` (which means a waker was awoken via a call to `Notifier::notify()`),
+/// What `LocalExecutor::run` does is to - in a loop - call `wait()` on the wake instance.
+/// Once awoken from `wait()` (which means a task `Waker` was awoken and it scheduled its task and called `Wake::wake`),
 /// the executor runs all tasks which had been scheduled to run by their awoken wakers.
 /// Once the scheduled tasks' queue is empty again, the executor calls `wait()` again.
 ///
 /// Notable exceptions are event-loop based monitors like WASM and others
-/// where the executor is started once (via `Executor::start`) and then
-/// scheduled for execution on the event loop when notified.
-pub trait Wait: Monitor {
+/// where the executor is scheduled once (via `LocalExecutor::schedule`) and then
+/// re-scheduled for execution on the event loop when awoken.
+pub trait Wait {
     fn wait(&self);
 }
 
+impl<T> Wait for &T
+where
+    T: Wait,
+{
+    fn wait(&self) {
+        (*self).wait();
+    }
+}
+
+impl<T> Wait for &mut T
+where
+    T: Wait,
+{
+    fn wait(&self) {
+        (**self).wait();
+    }
+}
+
 /// An alternative to `Wait` that is typically implemented for executors that
-/// are scheduled on an event-loop and thus do NOT follow the
+/// are to be scheduled on an event-loop and thus do not follow the
 /// "sleep the executor current thread until notified and then run the executor in the thread"
 /// pattern, achieved by implementing the `Wait` trait.
 ///
-/// Enables the `Executor::start` method.
-pub trait Start: Monitor {
-    fn start<P>(&self, poll_fn: P)
+/// Enables the `LocalExecutor::schedule` method.
+pub trait Schedule {
+    fn schedule<P>(&self, poll_fn: P)
     where
-        P: FnMut() + 'static;
+        P: FnMut() -> bool + 'static;
 }
 
-/// Designates a `Local` executor.
-///
-/// Local executors can be polled and thus execute their tasks from a single thread only,
-/// so task parallelism is not possible.
-///
-/// Yet, these executors have the benefit that futures spawned on them do not need to be `Send + 'static`
-/// and can live only as long as the executor lives.
-pub type Local = *const ();
+impl<T> Schedule for &T
+where
+    T: Schedule,
+{
+    fn schedule<P>(&self, poll_fn: P)
+    where
+        P: FnMut() -> bool + 'static,
+    {
+        (*self).schedule(poll_fn)
+    }
+}
 
-/// Designates a `Sendable` (i.e. work-stealing) executor.
-///
-/// Sendable executors can be polled from multiple threads and thus can execute their tasks
-/// in a parallel fashion from multiple threads, thus achieving task parallelism.
-///
-/// These executors require that the futures spawned on them are `Send + 'static`, as the futures
-/// might be moved to other threads different from the thread where they were spawned.
-pub type Sendable = ();
+impl<T> Schedule for &mut T
+where
+    T: Schedule,
+{
+    fn schedule<P>(&self, poll_fn: P)
+    where
+        P: FnMut() -> bool + 'static,
+    {
+        (**self).schedule(poll_fn)
+    }
+}
 
-/// `Executor` is an async executor that is useful specfically for embedded environments.
+/// `LocalExecutor` is an async executor for microcontrollers.
 ///
-/// The implementation is in fact a thin wrapper around [smol](::smol)'s [async-task](::async-task) crate.
+/// The implementation is a thin wrapper around [smol](::smol)'s [async-task](::async-task) crate.
+/// It tries to follow closely the API of [smol](::smol)'s [async-executor](::async-executor) crate, so that it can serve as a (mostly) drop-in replacement.
 ///
 /// Highlights:
 /// - `no_std` (but does need `alloc`; for a `no_std` *and* "no_alloc" executor, look at [Embassy](::embassy), which statically pre-allocates all tasks);
-///            (note also that usage of `alloc` is very limited - only when a new task is being spawn, as well as the executor itself);
+///            (note also that the executor uses allocations in a limited way: when a new task is being spawn, as well as the executor itself);
+///
 /// - Does not assume an RTOS and can run completely bare-metal (or on top of an RTOS);
-/// - Pluggable [Monitor] mechanism which makes it ISR-friendly. In particular:
-///   - Tasks can be woken up (and thus re-scheduled) from within an ISR;
-///   - The executor itself can run not just in the main "thread", but from within an ISR as well;
-///     the latter is important for bare-metal non-RTOS use-cases, as it allows - by running multiple executors -
-///     one in the main "thread" and the others - on ISR interrupts - to achieve RTOS-like pre-emptive execution by scheduling higher-priority
-///     tasks in executors that run on (higher-level) ISRs and thus pre-empt the executors
-///     scheduled on lower-level ISR and the "main thread" one; note that deploying an executor in an ISR requires the allocator to be usable
-///     from an ISR (i.e. allocation/deallocation routines should be protected by critical sections that disable/enable interrupts);
-///   - Out of the box implementation for [Monitor] based on condvar, compatible with Rust STD
-///     (for cases where notifying from / running in ISRs is not important).
-///   - Out of the box implementation for [Monitor] based on WASM event loop, compatible with WASM
-pub struct Executor<'a, const C: usize, M, S = Local> {
+///
+/// - Pluggable [Notification] mechanism which makes it ISR-friendly, i.e. tasks can be woken up (and thus re-scheduled) from within an ISR
+///   (feature `wake-from-isr` should be enabled);
+///
+/// - Out of the box [Notification] implementation based on condvar, compatible with Rust STD
+///   (for cases where notifying from / running in ISRs is not important);
+///
+/// - Out of the box [Notification] implementation based on WASM event loop, compatible with WASM
+///
+/// - Out of the box [Notification] implementation for ESP-IDF based on FreeRTOS task notifications, compatible with the `wake-from-isr` feature.
+pub struct LocalExecutor<'a, const C: usize, W> {
     #[cfg(feature = "crossbeam-queue")]
     queue: Arc<crossbeam_queue::ArrayQueue<Runnable>>,
     #[cfg(not(feature = "crossbeam-queue"))]
     queue: Arc<heapless::mpmc::MpMcQueue<Runnable, C>>,
-    monitor: M,
-    _sendable: PhantomData<S>,
-    _marker: PhantomData<core::cell::UnsafeCell<&'a ()>>,
+    wakeup: W,
+    poll_runnable_waker: AtomicWaker,
+    _marker: PhantomData<core::cell::UnsafeCell<&'a Rc<()>>>,
 }
 
 #[allow(clippy::missing_safety_doc)]
-impl<'a, const C: usize, M, S> Executor<'a, C, M, S>
+impl<'a, const C: usize, W> LocalExecutor<'a, C, W>
 where
-    M: Monitor,
+    W: Wakeup,
 {
-    /// Creates a new executor instance using the provided `Monitor` type.
+    /// Creates a new executor instance using the provided `Wakeup` type.
     /// The monitor type needs to implement `Default`.
     pub fn new() -> Self
     where
-        M: Default,
+        W: Default,
     {
         Self::wrap(Default::default())
     }
 
-    /// Creates a new executor instance using the provided `Monitor` instance.
-    pub fn wrap(monitor: M) -> Self {
+    /// Creates a new executor instance using the provided `Wakeup` instance.
+    pub fn wrap(wakeup: W) -> Self {
         Self {
             #[cfg(feature = "crossbeam-queue")]
             queue: Arc::new(crossbeam_queue::ArrayQueue::new(C)),
             #[cfg(not(feature = "crossbeam-queue"))]
             queue: Arc::new(heapless::mpmc::MpMcQueue::<_, C>::new()),
-            monitor,
-            _sendable: PhantomData,
+            wakeup,
+            poll_runnable_waker: AtomicWaker::new(),
             _marker: PhantomData,
-        }
-    }
-
-    /// Spawns a new, detached task for the supplied future.
-    ///
-    /// Note that if the executor's queue size is equal to the number of currently
-    /// spawned and running tasks, spawning this additional task might cause the executor to panic
-    /// later, when the task is scheduled for polling.
-    pub fn spawn_detached<F, T>(&self, fut: F) -> Result<&Self, SpawnError>
-    where
-        F: Future<Output = T> + Send + 'a,
-        T: 'a,
-    {
-        self.spawn(fut)?.detach();
-
-        Ok(self)
-    }
-
-    /// Spawns a new task for the supplied future and collects it in the supplied `heapless::Vec` instance.
-    ///
-    /// Note that if the executor's queue size is equal to the number of currently
-    /// spawned and running tasks, spawning this additional task might cause the executor to panic
-    /// later, when the task is scheduled for polling.
-    pub fn spawn_collect<F, T>(
-        &self,
-        fut: F,
-        collector: &mut heapless::Vec<Task<T>, C>,
-    ) -> Result<&Self, SpawnError>
-    where
-        F: Future<Output = T> + Send + 'a,
-        T: 'a,
-    {
-        if collector.len() < C {
-            let task = self.spawn(fut)?;
-
-            collector
-                .push(task)
-                .map_err(|_| SpawnError::CollectorFull)?;
-
-            Ok(self)
-        } else {
-            Err(SpawnError::CollectorFull)
         }
     }
 
@@ -218,7 +203,7 @@ where
     /// Note that if the executor's queue size is equal to the number of currently
     /// spawned and running tasks, spawning this additional task might cause the executor to panic
     /// later, when the task is scheduled for polling.
-    pub fn spawn<F, T>(&self, fut: F) -> Result<Task<T>, SpawnError>
+    pub fn spawn<F, T>(&self, fut: F) -> Task<T>
     where
         F: Future<Output = T> + Send + 'a,
         T: 'a,
@@ -230,13 +215,13 @@ where
     ///
     /// This method is unsafe because it is not checking whether the future lives as long
     /// as the executor.
-    pub unsafe fn spawn_unchecked<F, T>(&self, fut: F) -> Result<Task<T>, SpawnError>
+    unsafe fn spawn_unchecked<F, T>(&self, fut: F) -> Task<T>
     where
         F: Future<Output = T>,
     {
         let schedule = {
             let queue = self.queue.clone();
-            let notify = self.monitor.notifier();
+            let wake = self.wakeup.waker();
 
             move |runnable| {
                 #[cfg(feature = "crossbeam-queue")]
@@ -249,7 +234,7 @@ where
                     queue.enqueue(runnable).unwrap();
                 }
 
-                notify.notify();
+                wake.wake_by_ref();
             }
         };
 
@@ -257,22 +242,16 @@ where
 
         runnable.schedule();
 
-        Ok(task)
+        task
     }
 
     /// Pops the first task scheduled for execution by the executor.
-    ///
-    /// Typically useful when the executor works in a work-stealing mode,
-    /// i.e. tasks are executed on a thread pool.
-    ///
-    /// For single-threaded execution, `poll`, `poll_one` are easier alternatives as they
-    /// abstract popping and running the scheduled tasks.
     ///
     /// Returns
     /// - `None` - if no task was scheduled for execution
     /// - `Some(Runnnable)` - the first task scheduled for execution. Calling `Runnable::run` will
     ///    execute the task. In other words, it will poll its future.
-    pub fn pop_scheduled(&self) -> Option<Runnable> {
+    fn try_runnable(&self) -> Option<Runnable> {
         let runnable;
 
         #[cfg(feature = "crossbeam-queue")]
@@ -288,18 +267,34 @@ where
         runnable
     }
 
+    /// Polls the first task scheduled for execution by the executor.
+    fn poll_runnable(&self, ctx: &mut Context<'_>) -> Poll<Runnable> {
+        self.poll_runnable_waker.register(ctx.waker());
+
+        if let Some(runnable) = self.try_runnable() {
+            Poll::Ready(runnable)
+        } else {
+            Poll::Pending
+        }
+    }
+
+    /// Waits for the next runnable task to run.
+    async fn runnable(&self) -> Runnable {
+        poll_fn(|ctx| self.poll_runnable(ctx)).await
+    }
+
     /// Polls the executor once and thus runs one task from those which had been scheduled to run by their wakers.
     ///
     /// Returns
-    /// `Poll::Pending` if no tasks had been scheduled for execution.
-    /// `Poll::Ready<()>` if at least one task was scheduled for execution and executed.
-    pub fn poll_one(&self) -> Poll<()> {
-        if let Some(runnable) = self.pop_scheduled() {
+    /// `false` if no tasks had been scheduled for execution.
+    /// `true` if a task was scheduled for execution and executed.
+    pub fn try_tick(&self) -> bool {
+        if let Some(runnable) = self.try_runnable() {
             runnable.run();
 
-            Poll::Ready(())
+            true
         } else {
-            Poll::Pending
+            false
         }
     }
 
@@ -309,26 +304,33 @@ where
     /// Returns
     /// `Poll::Pending` when all tasks (if any) in the queue had been executed
     /// `Poll::Ready<()>` if `condition` became `false` in the meantime
-    pub fn poll<B>(&self, condition: B) -> Poll<()>
-    where
-        B: Fn() -> bool,
-    {
-        while condition() {
-            if self.poll_one().is_pending() {
-                return Poll::Pending;
-            }
-        }
-
-        Poll::Ready(())
+    pub async fn tick(&self) {
+        self.runnable().await.run();
     }
 
-    /// Drops all supplied tasks. This method is necessary, because the tasks can only be dropped while the executor is running.
+    /// Continuously runs the executor while `condition` holds `true`.
     ///
-    /// As a side effect, tasks which had not been supplied for dropping will also run.
-    pub fn drop_tasks<T>(&self, tasks: T) {
-        drop(tasks);
+    /// This method requires that the `Monitor` instance used by the executor implements the `Wait` trait.
+    /// In other words, the monitor should be capable of providing "sleep" functionality to the executor.
+    pub async fn run<F, T>(&self, fut: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        let run_forever = async {
+            loop {
+                self.tick().await;
+            }
+        };
 
-        while !self.poll_one().is_pending() {}
+        run_forever.or(fut).await
+    }
+
+    pub fn block_on<F, T>(&self, fut: F) -> F::Output
+    where
+        F: Future,
+        W: Wait,
+    {
+        Blocker::wrap(&self.wakeup).block_on(self.run(fut))
     }
 
     /// Starts the executor in the background and runs it until `condition` holds `true`.
@@ -337,53 +339,34 @@ where
     /// This method requires that the `Monitor` instance used by the executor implements the `Start` trait.
     /// This trait is typically provided by monitors which allow embedding the executor in an event loop,
     /// similar to the browser/WASM event loop.
-    pub fn start<B, F>(&'static self, condition: B, finished: F)
+    pub fn schedule<F, R>(&'static self, fut: F, on_complete: R)
     where
-        M: Start,
-        B: Fn() -> bool + 'static,
-        F: FnOnce() + 'static,
+        F: Future + 'static,
+        R: FnOnce(F::Output) + 'static,
+        W: Schedule + Send,
     {
-        let executor = self;
-        let mut finished_opt = Some(finished);
+        let mut fut = alloc::boxed::Box::pin(self.run(fut));
+        let mut on_complete = Some(on_complete);
+        let wake = self.wakeup.waker();
 
-        self.monitor.start(move || {
-            if executor.poll(&condition).is_ready() {
-                if let Some(finished) = finished_opt.take() {
-                    finished();
-                } else {
-                    unreachable!("Should not happen - finished called twice");
+        let cb = move || {
+            let waker = Waker::from(wake.clone());
+            let mut cx = Context::from_waker(&waker);
+
+            if let Some(on_complete) = on_complete.take() {
+                match fut.as_mut().poll(&mut cx) {
+                    Poll::Ready(res) => {
+                        on_complete(res);
+                        true
+                    }
+                    Poll::Pending => false,
                 }
+            } else {
+                true
             }
-        });
-    }
+        };
 
-    /// Continuously runs the executor while `condition` holds `true`.
-    ///
-    /// This method requires that the `Monitor` instance used by the executor implements the `Wait` trait.
-    /// In other words, the monitor should be capable of providing "sleep" functionality to the executor.
-    pub fn run<B>(&self, condition: B)
-    where
-        M: Wait,
-        B: Fn() -> bool,
-    {
-        while self.poll(&condition).is_pending() {
-            self.wait();
-        }
-    }
-
-    /// Continuously runs the executor while `condition` holds `true`.
-    /// Once `condition` becomes `false`, drops all supplied tasks.
-    ///
-    /// This method requires that the `Monitor` instance used by the executor implements the `Wait` trait.
-    /// In other words, the monitor should be capable of providing "sleep" functionality to the executor.
-    pub fn run_tasks<B, T>(&self, condition: B, tasks: T)
-    where
-        M: Wait,
-        B: Fn() -> bool,
-    {
-        self.run(condition);
-
-        self.drop_tasks(tasks)
+        self.wakeup.schedule(cb);
     }
 
     /// Waits for one or more tasks to be scheduled for execution.
@@ -392,71 +375,15 @@ where
     /// In other words, the monitor should be capable of providing "sleep" functionality to the executor.
     pub fn wait(&self)
     where
-        M: Wait,
+        W: Wait,
     {
-        self.monitor.wait();
+        self.wakeup.wait();
     }
 }
 
-impl<'a, const C: usize, M> Executor<'a, C, M, Local>
+impl<'a, const C: usize, W> Default for LocalExecutor<'a, C, W>
 where
-    M: Monitor,
-{
-    /// Spawns a new, detached task for the supplied future.
-    ///
-    /// Note that if the executor's queue size is equal to the number of currently
-    /// spawned and running tasks, spawning this additional task might cause the executor to panic
-    /// later, when the task is scheduled for polling.
-    pub fn spawn_local_detached<F, T>(&self, fut: F) -> Result<&Self, SpawnError>
-    where
-        F: Future<Output = T> + 'a,
-        T: 'a,
-    {
-        self.spawn_local(fut)?.detach();
-
-        Ok(self)
-    }
-
-    /// Spawns a new task for the supplied future and collects it in the supplied `heapless::Vec` instance.
-    ///
-    /// Note that if the executor's queue size is equal to the number of currently
-    /// spawned and running tasks, spawning this additional task might cause the executor to panic
-    /// later, when the task is scheduled for polling.
-    pub fn spawn_local_collect<F, T>(
-        &self,
-        fut: F,
-        collector: &mut heapless::Vec<Task<T>, C>,
-    ) -> Result<&Self, SpawnError>
-    where
-        F: Future<Output = T> + 'a,
-        T: 'a,
-    {
-        let task = self.spawn_local(fut)?;
-
-        collector
-            .push(task)
-            .map_err(|_| SpawnError::CollectorFull)?;
-
-        Ok(self)
-    }
-
-    /// Spawns a new task for the supplied future.
-    ///
-    /// Note that if the executor's queue size is equal to the number of currently
-    /// spawned and running tasks, spawning this additional task might cause the executor to panic
-    /// later, when the task is scheduled for polling.
-    pub fn spawn_local<F, T>(&self, fut: F) -> Result<Task<T>, SpawnError>
-    where
-        F: Future<Output = T> + 'a,
-        T: 'a,
-    {
-        unsafe { self.spawn_unchecked(fut) }
-    }
-}
-
-impl<'a, const C: usize, M, S> Default for Executor<'a, C, M, S>
-where
-    M: Monitor + Default,
+    W: Wakeup + Default,
 {
     fn default() -> Self {
         Self::new()
@@ -465,129 +392,108 @@ where
 
 /// A very simple executor that can execute - on the current thread - a single future.
 #[derive(Clone)]
-pub struct Blocker<M>(M);
+pub struct Blocker<W>(W);
 
-impl<M> Blocker<M>
+impl<W> Blocker<W>
 where
-    M: Monitor + Wait,
-    M::Notify: Send + Sync + 'static,
+    W: Wakeup + Wait,
 {
     /// Creates a new executor instance using the provided `Monitor` type.
     /// The monitor type needs to implement `Default`.
     pub fn new() -> Self
     where
-        M: Default,
+        W: Default,
     {
         Self(Default::default())
     }
 
     /// Creates a new executor instance using the provided `Monitor` instance.
-    pub const fn wrap(notify_factory: M) -> Self {
-        Self(notify_factory)
+    pub const fn wrap(wakeup: W) -> Self {
+        Self(wakeup)
     }
 
-    /// Executes the supplied future on the current thread, this blocking it until the future becomes ready.
-    pub fn block_on<F>(&self, mut f: F) -> F::Output
+    /// Executes the supplied future on the current thread, thus blocking it until the future becomes ready.
+    pub fn block_on<F>(&self, mut fut: F) -> F::Output
     where
         F: Future,
     {
         log::trace!("block_on(): started");
 
-        let mut f = unsafe { core::pin::Pin::new_unchecked(&mut f) };
+        let mut fut = pin!(fut);
 
-        let notify = self.0.notifier();
+        let waker = self.0.waker().into();
 
-        let waker = waker_fn::waker_fn(move || {
-            notify.notify();
-        });
+        let mut cx = Context::from_waker(&waker);
 
-        let cx = &mut Context::from_waker(&waker);
-
-        loop {
-            if let Poll::Ready(t) = f.as_mut().poll(cx) {
-                log::trace!("block_on(): completed");
-                return t;
+        let res = loop {
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(res) => break res,
+                Poll::Pending => self.0.wait(),
             }
+        };
 
-            self.0.wait();
-        }
+        log::trace!("block_on(): finished");
+
+        res
     }
 }
 
-impl<M> Default for Blocker<M>
+impl<N> Default for Blocker<N>
 where
-    M: Monitor + Wait + Default,
-    M::Notify: Send + Sync + 'static,
+    N: Wakeup + Wait + Default,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// #[cfg(feature = "embedded-svc")]
-// impl<M> embedded_svc::executor::asynch::Blocker for Blocker<M>
-// where
-//     M: Monitor + Wait,
-//     M::Notify: Send + Sync + 'static,
-// {
-//     fn block_on<F>(&self, f: F) -> F::Output
-//     where
-//         F: Future,
-//     {
-//         Blocker::block_on(self, f)
-//     }
-// }
-
 #[cfg(feature = "std")]
 mod std {
-    use std::sync::{Condvar, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::task::Wake;
 
-    extern crate alloc;
-    use alloc::sync::{Arc, Weak};
+    use crate::{Wait, Wakeup};
 
-    use crate::{Monitor, Notify, Wait};
-
-    /// A `Monitor` instance based on `std::sync::Mutex` and `std::sync::Condvar`
+    /// A `Notification` instance based on `std::sync::Mutex` and `std::sync::Condvar`
+    ///
     /// Suitable for STD-compatible platforms where awaking a waker from an ISR
     /// is either not an option (regular operating systems like Linux)
     /// or not necessary.
-    pub struct StdMonitor(Mutex<()>, Arc<Condvar>);
+    pub struct StdWakeup(Mutex<()>, Arc<StdWake>);
 
-    impl StdMonitor {
+    impl StdWakeup {
         pub fn new() -> Self {
-            Self(Mutex::new(()), Arc::new(Condvar::new()))
+            Self(Mutex::new(()), Arc::new(StdWake(Condvar::new())))
         }
     }
 
-    impl Default for StdMonitor {
+    impl Default for StdWakeup {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl Monitor for StdMonitor {
-        type Notify = StdNotify;
+    impl Wakeup for StdWakeup {
+        type Wake = StdWake;
 
-        fn notifier(&self) -> Self::Notify {
-            StdNotify(Arc::downgrade(&self.1))
+        fn waker(&self) -> Arc<Self::Wake> {
+            self.1.clone()
         }
     }
 
-    impl Wait for StdMonitor {
+    impl Wait for StdWakeup {
         fn wait(&self) {
             let guard = self.0.lock().unwrap();
 
-            drop(self.1.wait(guard).unwrap());
+            drop(self.1 .0.wait(guard).unwrap());
         }
     }
 
-    pub struct StdNotify(Weak<Condvar>);
+    pub struct StdWake(Condvar);
 
-    impl Notify for StdNotify {
-        fn notify(&self) {
-            if let Some(notify) = Weak::upgrade(&self.0) {
-                notify.notify_one();
-            }
+    impl Wake for StdWake {
+        fn wake(self: Arc<Self>) {
+            self.0.notify_one();
         }
     }
 }
@@ -596,73 +502,79 @@ mod std {
 mod wasm {
     use core::cell::RefCell;
 
-    extern crate alloc;
-    use alloc::rc::{Rc, Weak};
-
     use js_sys::Promise;
 
     use wasm_bindgen::prelude::*;
 
-    use crate::{Monitor, Notify, Start};
+    use crate::{Notify, Schedule};
 
-    struct WasmContext {
+    struct Context {
         promise: Promise,
         closure: Option<Closure<dyn FnMut(JsValue)>>,
     }
 
-    /// A `Monitor` instance for web-assembly (WASM) based browser targets.
+    /// A `Wake` instance for web-assembly (WASM) based browser targets.
     ///
-    /// Works by integrating the monitor (and thus the executor) into the browser event loop.
+    /// Works by integrating the wake instance (and thus the executor) into the browser event loop.
     ///
     /// Tasks are scheduled for execution in the browser event loop, by turning those into JavaScript Promises.
-    pub struct WasmMonitor(Rc<RefCell<WasmContext>>);
+    pub struct WasmNotification(Arc<RefCell<Context>>, *const ());
 
-    impl WasmMonitor {
+    impl WasmNotification {
         pub fn new() -> Self {
-            Self(Rc::new(RefCell::new(WasmContext {
+            Self(Rc::new(RefCell::new(Context {
                 promise: Promise::resolve(&JsValue::undefined()),
                 closure: None,
             })))
         }
     }
 
-    impl Default for WasmMonitor {
+    impl Default for WasmNotification {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl Monitor for WasmMonitor {
-        type Notify = WasmNotify;
+    impl Wake for WasmNotification {
+        fn wake(self: Arc<Self>) {
+            let ctx = self.0.borrow_mut();
 
-        fn notifier(&self) -> Self::Notify {
-            WasmNotify(Rc::downgrade(&self.0))
+            if let Some(closure) = ctx.closure.as_ref() {
+                let _ = ctx.promise.then(closure);
+            }
         }
     }
 
-    impl Start for WasmMonitor {
+    impl Schedule for WasmNotification {
         fn start<P>(&self, mut poll_fn: P)
         where
-            P: FnMut() + 'static,
+            P: FnMut() -> bool + 'static,
         {
             {
-                self.0.borrow_mut().closure = Some(Closure::new(move |_| poll_fn()));
+                let ctx = self.0.clone();
+
+                self.0.borrow_mut().closure = Some(Closure::new(move |_| {
+                    if poll_fn() {
+                        ctx.borrow_mut().closure = None;
+                    }
+                }));
             }
 
-            self.notifier().notify();
+            self.notifier().wake();
         }
     }
 
-    pub struct WasmNotify(Weak<RefCell<WasmContext>>);
+    pub struct WasmNotifier {
+        promise: Promise,
+        closure: Option<Closure<dyn FnMut(JsValue)>>,
+    }
 
-    impl Notify for WasmNotify {
-        fn notify(&self) {
-            if let Some(rc) = Weak::upgrade(&self.0) {
-                let ctx = rc.borrow_mut();
+    impl Wake for WasmNotifier {
+        fn wake(self: Arc<Self>) {
+            let ctx = self.0.borrow_mut();
 
-                if let Some(closure) = ctx.closure.as_ref() {
-                    let _ = ctx.promise.then(closure);
-                }
+            if let Some(closure) = ctx.closure.as_ref() {
+                let _ = ctx.promise.then(closure);
             }
         }
     }
@@ -675,19 +587,15 @@ mod eventloop {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     extern crate alloc;
+
     use alloc::boxed::Box;
-    use alloc::sync::{Arc, Weak};
+    use alloc::sync::Arc;
+    use alloc::task::Wake;
 
-    use crate::{Monitor, Notify, Start};
+    use crate::{Schedule, Wakeup};
 
-    struct EventLoopContext {
-        scheduler: Box<dyn Fn(extern "C" fn(*mut ()), *mut ())>,
-        scheduled: AtomicBool,
-        poller: UnsafeCell<Option<Box<dyn FnMut()>>>,
-    }
-
-    unsafe impl Send for EventLoopContext {}
-    unsafe impl Sync for EventLoopContext {}
+    pub type Arg = *mut ();
+    pub type Callback = extern "C" fn(Arg);
 
     /// A generic `Monitor` instance useful for integrating into a native event loop, by scheduling
     /// the execution of the tasks to happen in the event loop.
@@ -695,16 +603,16 @@ mod eventloop {
     /// Only event loops that provide a way to schedule a piece of "work" in the event loop are
     /// amenable to such integration. Typical event loops include the GLIB event loop, the Matter
     /// C++ SDK event loop, and possibly many others.
-    pub struct EventLoopMonitor(Arc<EventLoopContext>, PhantomData<*const ()>);
+    pub struct EventLoopWakeup<S>(Arc<EventLoopWake<S>>, PhantomData<*const ()>);
 
-    impl EventLoopMonitor {
-        pub fn new<S>(scheduler: S) -> Self
-        where
-            S: Fn(extern "C" fn(*mut ()), *mut ()) + 'static,
-        {
+    impl<S> EventLoopWakeup<S>
+    where
+        S: Fn(Callback, Arg) + 'static,
+    {
+        pub fn new(scheduler: S) -> Self {
             Self(
-                Arc::new(EventLoopContext {
-                    scheduler: Box::new(scheduler),
+                Arc::new(EventLoopWake {
+                    scheduler,
                     scheduled: AtomicBool::new(false),
                     poller: UnsafeCell::new(None),
                 }),
@@ -713,57 +621,77 @@ mod eventloop {
         }
     }
 
-    impl Monitor for EventLoopMonitor {
-        type Notify = EventLoopNotify;
+    impl<S> Wakeup for EventLoopWakeup<S>
+    where
+        S: Fn(Callback, Arg) + 'static,
+    {
+        type Wake = EventLoopWake<S>;
 
-        fn notifier(&self) -> Self::Notify {
-            EventLoopNotify(Arc::downgrade(&self.0))
+        fn waker(&self) -> Arc<Self::Wake> {
+            self.0.clone()
         }
     }
 
-    impl Start for EventLoopMonitor {
-        fn start<P>(&self, poll_fn: P)
+    impl<S> Schedule for EventLoopWakeup<S>
+    where
+        S: Fn(Callback, Arg) + 'static,
+    {
+        fn schedule<P>(&self, poll_fn: P)
         where
-            P: FnMut() + 'static,
+            P: FnMut() -> bool + 'static,
         {
-            {
-                *unsafe { self.0.poller.get().as_mut() }.unwrap() = Some(Box::new(poll_fn));
-            }
+            let ctx = &self.0;
 
-            self.notifier().notify();
+            *unsafe { ctx.poller() } = Some(Box::new(poll_fn));
+
+            self.waker().wake();
         }
     }
 
-    pub struct EventLoopNotify(Weak<EventLoopContext>);
+    pub struct EventLoopWake<S> {
+        scheduler: S,
+        scheduled: AtomicBool,
+        poller: UnsafeCell<Option<Box<dyn FnMut() -> bool + 'static>>>,
+    }
 
-    impl EventLoopNotify {
-        extern "C" fn run(ctx: *mut ()) {
-            let ctx = unsafe { Arc::from_raw(ctx as *const EventLoopContext) };
+    impl<S> EventLoopWake<S> {
+        unsafe fn poller(&self) -> &mut Option<Box<dyn FnMut() -> bool + 'static>> {
+            self.poller.get().as_mut().unwrap()
+        }
+
+        extern "C" fn run(arg: Arg) {
+            let ctx = unsafe { Arc::from_raw(arg as *const EventLoopWake<S>) };
 
             ctx.scheduled.store(false, Ordering::SeqCst);
 
-            if let Some(poll_fn) = unsafe { ctx.poller.get().as_mut() }.unwrap().as_mut() {
-                poll_fn();
+            if let Some(poll_fn) = unsafe { ctx.poller() } {
+                if poll_fn() {
+                    *unsafe { ctx.poller() } = None;
+                }
             }
         }
     }
 
-    impl Notify for EventLoopNotify {
-        fn notify(&self) {
-            if let Some(ctx) = Weak::upgrade(&self.0) {
-                if let Ok(false) =
-                    ctx.scheduled
-                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                {
-                    // TODO: Will leak the Arc if the scheduled event is not executed
-                    (ctx.scheduler)(Self::run, Arc::into_raw(ctx.clone()) as *mut _);
-                }
+    unsafe impl<S> Send for EventLoopWake<S> {}
+    unsafe impl<S> Sync for EventLoopWake<S> {}
+
+    impl<S> Wake for EventLoopWake<S>
+    where
+        S: Fn(Callback, Arg) + 'static,
+    {
+        fn wake(self: Arc<Self>) {
+            if let Ok(false) =
+                self.scheduled
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                // TODO: Will leak the Arc if the scheduled event is not executed
+                (self.scheduler)(Self::run, Arc::into_raw(self.clone()) as *mut _);
             }
         }
     }
 }
 
-#[cfg(all(feature = "alloc", feature = "esp-idf-hal", target_has_atomic = "ptr"))]
+#[cfg(all(feature = "alloc", feature = "esp-idf", target_has_atomic = "ptr"))]
 mod espidf {
     use core::num::NonZeroU32;
 
@@ -771,31 +699,23 @@ mod espidf {
 
     pub use super::*;
 
-    pub type EspExecutor<'a, const C: usize, S> = Executor<'a, C, FreeRtosMonitor, S>;
-    pub type EspBlocker = Blocker<FreeRtosMonitor>;
+    pub type EspExecutor<'a, const C: usize, S> = LocalExecutor<'a, C, EspWakeup>;
+    pub type EspBlocker = Blocker<EspWakeup>;
 
-    pub type FreeRtosMonitor = notification::Monitor;
-    pub type FreeRtosNotify = notification::Notifier;
+    pub type EspWakeup = notification::Notification;
+    pub type EspWake = notification::Notifier;
 
-    impl Monitor for notification::Monitor {
-        type Notify = notification::Notifier;
+    impl Wakeup for EspWakeup {
+        type Wake = EspWake;
 
-        fn notifier(&self) -> Self::Notify {
-            notification::Monitor::notifier(self)
+        fn waker(&self) -> Arc<Self::Wake> {
+            EspWakeup::notifier(self)
         }
     }
 
-    impl Wait for notification::Monitor {
+    impl Wait for EspWakeup {
         fn wait(&self) {
-            notification::Monitor::wait_any(self)
-        }
-    }
-
-    impl Notify for notification::Notifier {
-        fn notify(&self) {
-            unsafe {
-                notification::Notifier::notify_and_yield(self, NonZeroU32::new(1).unwrap());
-            }
+            self.0.wait_any()
         }
     }
 }
