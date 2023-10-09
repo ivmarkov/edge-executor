@@ -608,7 +608,7 @@ mod ceventloop {
     }
 
     // These are safe, because EventLoopWake cannot be constructed outside of this module, and does not have a public API
-    // All calls into the (potentially !Send, !Sync interior of )
+    // All calls into the (potentially !Send, !Sync) interior of this struct are guarded
     unsafe impl<S> Send for CEventLoopWake<S> {}
     unsafe impl<S> Sync for CEventLoopWake<S> {}
 
