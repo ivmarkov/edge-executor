@@ -723,14 +723,12 @@ mod wasm {
 
 #[cfg(target_os = "espidf")]
 mod espidf {
-    use core::num::NonZeroU32;
-
     use esp_idf_hal::task::notification;
 
     pub use super::*;
 
     pub type PlatformExecutor<'a> = LocalExecutor<'a, PlatformWakeup>;
-    pub type PlatformWakeup<'a> = EspWakeup;
+    pub type PlatformWakeup = EspWakeup;
 
     pub type EspWakeup = notification::Notification;
     pub type EspWake = notification::Notifier;
@@ -745,7 +743,7 @@ mod espidf {
 
     impl Wait for EspWakeup {
         fn wait(&self) {
-            self.0.wait_any()
+            self.wait_any()
         }
     }
 }
