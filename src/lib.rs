@@ -391,7 +391,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use edge_executor::{LocalExecutor, StdWakeup};
+    /// use edge_executor::{LocalExecutor, StdWakeup, Wait};
     ///
     /// let ex = LocalExecutor::<StdWakeup>::new();
     ///
@@ -409,7 +409,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use edge_executor::{LocalExecutor, StdWakeup};
+    /// use edge_executor::{LocalExecutor, StdWakeup, Wait};
     ///
     /// let local_ex = LocalExecutor::<StdWakeup>::new();
     ///
