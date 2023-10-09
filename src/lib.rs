@@ -20,13 +20,13 @@ use futures_lite::FutureExt;
 #[cfg(feature = "std")]
 pub use crate::std::*;
 
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "8"))]
+#[cfg(all(target_has_atomic = "ptr", target_has_atomic = "8"))]
 pub use crate::eventloop::*;
 
-#[cfg(all(feature = "alloc", feature = "esp-idf", target_has_atomic = "ptr"))]
+#[cfg(target_os = "espidf")]
 pub use crate::espidf::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(target_arch = "wasm32")]
 pub use crate::wasm::*;
 
 /// This trait captures the notion of an execution wakeup that needs to happen
@@ -205,26 +205,31 @@ where
 /// `LocalExecutor` is an async executor for microcontrollers.
 ///
 /// The implementation is a thin wrapper around [smol](::smol)'s [async-task](::async-task) crate.
-/// It tries to follow closely the API of [smol](::smol)'s [async-executor](::async-executor) crate, so that it can serve as a (mostly) drop-in replacement.
 ///
 /// Highlights:
 /// - `no_std` (but does need `alloc`; for a `no_std` *and* "no_alloc" executor, look at [Embassy](::embassy), which statically pre-allocates all tasks);
 ///            (note also that the executor uses allocations in a limited way: when a new task is being spawn, as well as the executor itself);
+///
+/// - Tries to follow closely the API of [smol](::smol)'s [async-executor](::async-executor) crate, so that it can serve as a (mostly) drop-in replacement;
 ///
 /// - Does not assume an RTOS and can run completely bare-metal (or on top of an RTOS);
 ///
 /// - Local execution only. No plans for implementing work-stealing execution, as threads are either a scarce resource on microcontrollers' RTOS,
 ///   or do not exist at all (Rust bare-metal);
 ///
-/// - Pluggable [Wakeup] mechanism which makes it ISR-friendly, i.e. tasks can be woken up (and thus re-scheduled) from within an ISR
-///   (feature `wake-from-isr` should be enabled);
+/// - Pluggable [Wakeup] mechanism which makes it customizable for different microcontrollers;
+///
+/// - ISR-friendly, i.e. tasks can be woken up (and thus re-scheduled) from within an ISR
+///   (Enable with feature `wake-from-isr`);
 ///
 /// - [StdWakeup] implementation based on a mutex + condvar pair, compatible with Rust STD
-///   (for cases where notifying from / running in ISRs is not important);
+///   (Enable with feature `std`; for cases where notifying from / running in ISRs is not important);
 ///
-/// - [EspWakeup] implementation for ESP-IDF based on FreeRTOS task notifications, compatible with the `wake-from-isr` feature;
+/// - [EspWakeup] implementation for ESP-IDF based on FreeRTOS task notifications, compatible with the `wake-from-isr` feature
+///   (enable with feature `espidf`);
 ///
-/// - [WasmWakeup] implementation for the WASM event loop, compatible with WASM;
+/// - [WasmWakeup] implementation for the WASM event loop, compatible with WASM
+///   (enable with feature `wasm`);
 ///
 /// - [EventLoopWakeup] implementation for native event loops like those of GLIB, the Matter C++ SDK and others.
 pub struct LocalExecutor<'a, W, const C: usize = 64> {
@@ -443,10 +448,15 @@ where
 
 #[cfg(feature = "std")]
 mod std {
-    use std::sync::{Arc, Condvar, Mutex};
-    use std::task::Wake;
+    use ::std::sync::{Arc, Condvar, Mutex};
+    use ::std::task::Wake;
 
-    use crate::{Wait, Wakeup};
+    use crate::*;
+
+    #[cfg(not(any(target_os = "espidf", target_arch = "wasm32")))]
+    pub type PlatformExecutor<'a> = LocalExecutor<'a, PlatformWakeup>;
+    #[cfg(not(any(target_os = "espidf", target_arch = "wasm32")))]
+    pub type PlatformWakeup = StdWakeup;
 
     /// A `Notification` instance based on `std::sync::Mutex` and `std::sync::Condvar`
     ///
@@ -492,89 +502,7 @@ mod std {
     }
 }
 
-#[cfg(feature = "wasm")]
-mod wasm {
-    use core::cell::RefCell;
-
-    use js_sys::Promise;
-
-    use wasm_bindgen::prelude::*;
-
-    use crate::{Notify, Schedule};
-
-    struct Context {
-        promise: Promise,
-        closure: Option<Closure<dyn FnMut(JsValue)>>,
-    }
-
-    /// A `Wake` instance for web-assembly (WASM) based browser targets.
-    ///
-    /// Works by integrating the wake instance (and thus the executor) into the browser event loop.
-    ///
-    /// Tasks are scheduled for execution in the browser event loop, by turning those into JavaScript Promises.
-    pub struct WasmNotification(Arc<RefCell<Context>>, *const ());
-
-    impl WasmNotification {
-        pub fn new() -> Self {
-            Self(Rc::new(RefCell::new(Context {
-                promise: Promise::resolve(&JsValue::undefined()),
-                closure: None,
-            })))
-        }
-    }
-
-    impl Default for WasmNotification {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl Wake for WasmNotification {
-        fn wake(self: Arc<Self>) {
-            let ctx = self.0.borrow_mut();
-
-            if let Some(closure) = ctx.closure.as_ref() {
-                let _ = ctx.promise.then(closure);
-            }
-        }
-    }
-
-    impl Schedule for WasmNotification {
-        fn start<P>(&self, mut poll_fn: P)
-        where
-            P: FnMut() -> bool + 'static,
-        {
-            {
-                let ctx = self.0.clone();
-
-                self.0.borrow_mut().closure = Some(Closure::new(move |_| {
-                    if poll_fn() {
-                        ctx.borrow_mut().closure = None;
-                    }
-                }));
-            }
-
-            self.notifier().wake();
-        }
-    }
-
-    pub struct WasmNotifier {
-        promise: Promise,
-        closure: Option<Closure<dyn FnMut(JsValue)>>,
-    }
-
-    impl Wake for WasmNotifier {
-        fn wake(self: Arc<Self>) {
-            let ctx = self.0.borrow_mut();
-
-            if let Some(closure) = ctx.closure.as_ref() {
-                let _ = ctx.promise.then(closure);
-            }
-        }
-    }
-}
-
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "8"))]
+#[cfg(all(target_has_atomic = "ptr", target_has_atomic = "8"))]
 mod eventloop {
     use core::cell::UnsafeCell;
     use core::marker::PhantomData;
@@ -586,7 +514,9 @@ mod eventloop {
     use alloc::sync::Arc;
     use alloc::task::Wake;
 
-    use crate::{Schedule, Wakeup};
+    use crate::*;
+
+    pub type EventLoopExecutor<'a, S> = LocalExecutor<'a, EventLoopWakeup<S>>;
 
     pub type Arg = *mut ();
     pub type Callback = extern "C" fn(Arg);
@@ -685,7 +615,95 @@ mod eventloop {
     }
 }
 
-#[cfg(all(feature = "alloc", feature = "esp-idf", target_has_atomic = "ptr"))]
+#[cfg(target_arch = "wasm32")]
+mod wasm {
+    use core::cell::RefCell;
+    use core::marker::PhantomData;
+
+    extern crate alloc;
+
+    use alloc::sync::Arc;
+
+    use js_sys::Promise;
+
+    use wasm_bindgen::prelude::*;
+
+    use crate::*;
+
+    pub type PlatformExecutor<'a> = LocalExecutor<'a, PlatformWakeup>;
+    pub type PlatformWakeup = WasmWakeup;
+
+    struct Context {
+        promise: Promise,
+        closure: Option<Closure<dyn FnMut(JsValue)>>,
+    }
+
+    /// A `Wake` instance for web-assembly (WASM) based browser targets.
+    ///
+    /// Works by integrating the wake instance (and thus the executor) into the browser event loop.
+    ///
+    /// Tasks are scheduled for execution in the browser event loop, by turning those into JavaScript Promises.
+    pub struct WasmWakeup(Arc<WasmWake>, PhantomData<*const ()>);
+
+    impl WasmWakeup {
+        pub fn new() -> Self {
+            Self(
+                Arc::new(RefCell::new(Context {
+                    promise: Promise::resolve(&JsValue::undefined()),
+                    closure: None,
+                })),
+                PhantomData,
+            )
+        }
+    }
+
+    impl Default for WasmWakeup {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Wakeup for WasmWakeup {
+        type Wake = WasmWake;
+
+        fn waker(&self) -> Arc<Self::Wake> {
+            self.0.clone()
+        }
+    }
+
+    impl Schedule for WasmWakeup {
+        fn schedule_poll_fn<P>(&self, mut poll_fn: P)
+        where
+            P: FnMut() -> bool + 'static,
+        {
+            {
+                let ctx = self.0.clone();
+
+                ctx.borrow_mut().closure = Some(Closure::new(move |_| {
+                    if poll_fn() {
+                        ctx.borrow_mut().closure = None;
+                    }
+                }));
+            }
+
+            self.waker().wake();
+        }
+    }
+
+    pub struct WasmWake(RefCell<Context>);
+
+    impl Wake for WasmWake {
+        fn wake(self: Arc<Self>) {
+            let ctx = self.0.borrow_mut();
+
+            if let Some(closure) = ctx.closure.as_ref() {
+                let _ = ctx.promise.then(closure);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "espidf")]
 mod espidf {
     use core::num::NonZeroU32;
 
@@ -693,8 +711,8 @@ mod espidf {
 
     pub use super::*;
 
-    pub type EspExecutor<'a, S, const C: usize> = LocalExecutor<'a, EspWakeup, C>;
-    pub type EspBlocker = Blocker<EspWakeup>;
+    pub type PlatformExecutor<'a> = LocalExecutor<'a, PlatformWakeup>;
+    pub type PlatformWakeup<'a> = EspWakeup;
 
     pub type EspWakeup = notification::Notification;
     pub type EspWake = notification::Notifier;
