@@ -1,5 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
+use core::fmt;
 use core::future::{poll_fn, Future};
 use core::marker::PhantomData;
 use core::pin::pin;
@@ -21,7 +22,7 @@ use futures_lite::FutureExt;
 pub use crate::std::*;
 
 #[cfg(all(target_has_atomic = "ptr", target_has_atomic = "8"))]
-pub use crate::eventloop::*;
+pub use crate::ceventloop::*;
 
 #[cfg(target_os = "espidf")]
 pub use crate::espidf::*;
@@ -29,7 +30,7 @@ pub use crate::espidf::*;
 #[cfg(target_arch = "wasm32")]
 pub use crate::wasm::*;
 
-/// This trait captures the notion of an execution wakeup that needs to happen
+/// `Wakeup` captures the notion of an execution wakeup that needs to happen
 /// once a waker is awoken using `Waker::wake()`.
 ///
 /// The implementation of the trait is operating system and
@@ -71,6 +72,7 @@ where
     }
 }
 
+/// `Wait` is an extension of `Wakeup`.
 /// `Wakeup` instances that provide a "sleep" facility need to also implement this trait.
 /// Most `Wakeup` implementations should typically implement it.
 ///
@@ -130,18 +132,39 @@ where
     }
 }
 
-/// An alternative to `Wait` that is typically implemented for executors that
-/// are to be scheduled on an event-loop and thus do not follow the
+#[derive(Debug)]
+pub enum ScheduleError {
+    WrongContext,
+}
+
+impl fmt::Display for ScheduleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Schedule error")
+    }
+}
+
+#[cfg(feature = "std")]
+impl ::std::error::Error for ScheduleError {}
+
+/// `Schedule` is an alternative to `Wait` that is typically implemented for executors that
+/// are to be scheduled on an event-loop (or something similar to an event-loop) and thus do not follow the
 /// "sleep the executor current thread until notified and then run the executor in the thread"
 /// pattern, achieved by implementing the `Wait` trait.
 pub trait Schedule: Wakeup {
-    fn schedule_poll_fn<P>(&self, poll_fn: P)
+    /// Schedules `poll_fn` to run at some later time, on the event-loop.
+    ///
+    /// Calling this method MUST be done from within the "event-loop" as well, or else
+    /// the implementation will err with `ScheduleError`.
+    fn schedule_poll_fn<P>(&self, poll_fn: P) -> Result<(), ScheduleError>
     where
         P: FnMut() -> bool + 'static;
 
-    /// Schedules the future in the background and runs it until it becomes ready.
+    /// Schedules the future on the event-loop and runs it until it becomes ready.
     /// At the end of the execution, calls the `on_complete` callback.
-    fn schedule<F, R>(&self, fut: F, on_complete: R)
+    ///
+    /// Calling this method MUST be done from within the "event-loop" as well, or else
+    /// the implementation will err with `ScheduleError`.
+    fn schedule<F, R>(&self, fut: F, on_complete: R) -> Result<(), ScheduleError>
     where
         F: Future + 'static,
         R: FnOnce(F::Output) + 'static,
@@ -171,7 +194,7 @@ pub trait Schedule: Wakeup {
             }
         };
 
-        self.schedule_poll_fn(poll_fn);
+        self.schedule_poll_fn(poll_fn)
     }
 }
 
@@ -179,7 +202,7 @@ impl<T> Schedule for &T
 where
     T: Schedule,
 {
-    fn schedule_poll_fn<P>(&self, poll_fn: P)
+    fn schedule_poll_fn<P>(&self, poll_fn: P) -> Result<(), ScheduleError>
     where
         P: FnMut() -> bool + 'static,
     {
@@ -191,7 +214,7 @@ impl<T> Schedule for &mut T
 where
     T: Schedule,
 {
-    fn schedule_poll_fn<P>(&self, poll_fn: P)
+    fn schedule_poll_fn<P>(&self, poll_fn: P) -> Result<(), ScheduleError>
     where
         P: FnMut() -> bool + 'static,
     {
@@ -228,7 +251,7 @@ where
 /// - [WasmWakeup] implementation for the WASM event loop, compatible with WASM
 ///   (enable with feature `wasm`);
 ///
-/// - [EventLoopWakeup] implementation for native event loops like those of GLIB, the Matter C++ SDK and others.
+/// - [CEventLoopWakeup] implementation for native event loops like those of GLIB, the Matter C++ SDK and others.
 pub struct LocalExecutor<'a, W, const C: usize = 64> {
     #[cfg(feature = "crossbeam-queue")]
     queue: Arc<crossbeam_queue::ArrayQueue<Runnable>>,
@@ -342,7 +365,7 @@ where
     }
 
     /// Polls the first task scheduled for execution by the executor.
-    fn poll_runnable(&self, ctx: &mut Context<'_>) -> Poll<Runnable> {
+    fn poll_runnable(&self, ctx: &Context<'_>) -> Poll<Runnable> {
         self.poll_runnable_waker.register(ctx.waker());
 
         if let Some(runnable) = self.try_runnable() {
@@ -499,8 +522,8 @@ mod std {
     }
 }
 
-#[cfg(all(target_has_atomic = "ptr", target_has_atomic = "8"))]
-mod eventloop {
+#[cfg(target_has_atomic = "8")]
+mod ceventloop {
     use core::cell::UnsafeCell;
     use core::marker::PhantomData;
     use core::sync::atomic::{AtomicBool, Ordering};
@@ -513,10 +536,10 @@ mod eventloop {
 
     use crate::*;
 
-    pub type EventLoopExecutor<'a, S> = LocalExecutor<'a, EventLoopWakeup<S>>;
+    pub type CEventLoopExecutor<'a, S> = LocalExecutor<'a, CEventLoopWakeup<S>>;
 
-    pub type Arg = *mut ();
-    pub type Callback = extern "C" fn(Arg);
+    pub type CEventLoopCallback = extern "C" fn(CEventLoopCallbackArg);
+    pub type CEventLoopCallbackArg = *mut ();
 
     /// A generic `Monitor` instance useful for integrating into a native event loop, by scheduling
     /// the execution of the tasks to happen in the event loop.
@@ -524,15 +547,15 @@ mod eventloop {
     /// Only event loops that provide a way to schedule a piece of "work" in the event loop are
     /// amenable to such integration. Typical event loops include the GLIB event loop, the Matter
     /// C++ SDK event loop, and possibly many others.
-    pub struct EventLoopWakeup<S>(Arc<EventLoopWake<S>>, PhantomData<*const ()>);
+    pub struct CEventLoopWakeup<S>(Arc<CEventLoopWake<S>>, PhantomData<*const ()>);
 
-    impl<S> EventLoopWakeup<S>
+    impl<S> CEventLoopWakeup<S>
     where
-        S: Fn(Callback, Arg) + 'static,
+        S: FnMut(CEventLoopCallback, CEventLoopCallbackArg),
     {
         pub fn new(scheduler: S) -> Self {
             Self(
-                Arc::new(EventLoopWake {
+                Arc::new(CEventLoopWake {
                     scheduler,
                     scheduled: AtomicBool::new(false),
                     poller: UnsafeCell::new(None),
@@ -542,22 +565,22 @@ mod eventloop {
         }
     }
 
-    impl<S> Wakeup for EventLoopWakeup<S>
+    impl<S> Wakeup for CEventLoopWakeup<S>
     where
-        S: Fn(Callback, Arg) + 'static,
+        S: Fn(CEventLoopCallback, CEventLoopCallbackArg) + 'static,
     {
-        type Wake = EventLoopWake<S>;
+        type Wake = CEventLoopWake<S>;
 
         fn waker(&self) -> Arc<Self::Wake> {
             self.0.clone()
         }
     }
 
-    impl<S> Schedule for EventLoopWakeup<S>
+    impl<S> Schedule for CEventLoopWakeup<S>
     where
-        S: Fn(Callback, Arg) + 'static,
+        S: Fn(CEventLoopCallback, CEventLoopCallbackArg) + 'static,
     {
-        fn schedule_poll_fn<P>(&self, poll_fn: P)
+        fn schedule_poll_fn<P>(&self, poll_fn: P) -> Result<(), ScheduleError>
         where
             P: FnMut() -> bool + 'static,
         {
@@ -566,22 +589,25 @@ mod eventloop {
             *unsafe { ctx.poller() } = Some(Box::new(poll_fn));
 
             self.waker().wake();
+
+            Ok(())
         }
     }
 
-    pub struct EventLoopWake<S> {
+    pub struct CEventLoopWake<S> {
         scheduler: S,
         scheduled: AtomicBool,
         poller: UnsafeCell<Option<Box<dyn FnMut() -> bool + 'static>>>,
     }
 
-    impl<S> EventLoopWake<S> {
+    impl<S> CEventLoopWake<S> {
+        #[allow(clippy::mut_from_ref)]
         unsafe fn poller(&self) -> &mut Option<Box<dyn FnMut() -> bool + 'static>> {
             self.poller.get().as_mut().unwrap()
         }
 
-        extern "C" fn run(arg: Arg) {
-            let ctx = unsafe { Arc::from_raw(arg as *const EventLoopWake<S>) };
+        extern "C" fn run(arg: CEventLoopCallbackArg) {
+            let ctx = unsafe { Arc::from_raw(arg as *const CEventLoopWake<S>) };
 
             ctx.scheduled.store(false, Ordering::SeqCst);
 
@@ -593,12 +619,14 @@ mod eventloop {
         }
     }
 
-    unsafe impl<S> Send for EventLoopWake<S> {}
-    unsafe impl<S> Sync for EventLoopWake<S> {}
+    // These are safe, because EventLoopWake cannot be constructed outside of this module, and does not have a public API
+    // All calls into the (potentially !Send, !Sync interior of )
+    unsafe impl<S> Send for CEventLoopWake<S> {}
+    unsafe impl<S> Sync for CEventLoopWake<S> {}
 
-    impl<S> Wake for EventLoopWake<S>
+    impl<S> Wake for CEventLoopWake<S>
     where
-        S: Fn(Callback, Arg) + 'static,
+        S: Fn(CEventLoopCallback, CEventLoopCallbackArg) + 'static,
     {
         fn wake(self: Arc<Self>) {
             if let Ok(false) =
@@ -612,10 +640,11 @@ mod eventloop {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(feature = "std", target_arch = "wasm32"))]
 mod wasm {
-    use core::cell::RefCell;
     use core::marker::PhantomData;
+
+    use ::std::sync::Mutex;
 
     extern crate alloc;
 
@@ -635,6 +664,8 @@ mod wasm {
         closure: Option<Closure<dyn FnMut(JsValue)>>,
     }
 
+    unsafe impl Send for Context {}
+
     /// A `Wakeup` instance for web-assembly (WASM) based targets.
     ///
     /// Works by integrating the wake instance (and thus the executor) into the WASM event loop.
@@ -645,10 +676,10 @@ mod wasm {
     impl WasmWakeup {
         pub fn new() -> Self {
             Self(
-                Arc::new(RefCell::new(Context {
+                Arc::new(WasmWake(Mutex::new(Context {
                     promise: Promise::resolve(&JsValue::undefined()),
                     closure: None,
-                })),
+                }))),
                 PhantomData,
             )
         }
@@ -669,29 +700,31 @@ mod wasm {
     }
 
     impl Schedule for WasmWakeup {
-        fn schedule_poll_fn<P>(&self, mut poll_fn: P)
+        fn schedule_poll_fn<P>(&self, mut poll_fn: P) -> Result<(), ScheduleError>
         where
             P: FnMut() -> bool + 'static,
         {
             {
                 let ctx = self.0.clone();
 
-                ctx.borrow_mut().closure = Some(Closure::new(move |_| {
+                self.0 .0.lock().unwrap().closure = Some(Closure::new(move |_| {
                     if poll_fn() {
-                        ctx.borrow_mut().closure = None;
+                        ctx.0.lock().unwrap().closure = None;
                     }
                 }));
             }
 
             self.waker().wake();
+
+            Ok(())
         }
     }
 
-    pub struct WasmWake(RefCell<Context>);
+    pub struct WasmWake(Mutex<Context>);
 
     impl Wake for WasmWake {
         fn wake(self: Arc<Self>) {
-            let ctx = self.0.borrow_mut();
+            let ctx = self.0.lock().unwrap();
 
             if let Some(closure) = ctx.closure.as_ref() {
                 let _ = ctx.promise.then(closure);
