@@ -253,10 +253,10 @@ where
 ///
 /// - [CEventLoopWakeup] implementation for native event loops like those of GLIB, the Matter C++ SDK and others.
 pub struct LocalExecutor<'a, W, const C: usize = 64> {
-    #[cfg(feature = "crossbeam-queue")]
+    #[cfg(feature = "unbounded")]
+    queue: Arc<crossbeam_queue::SegQueue<Runnable>>,
+    #[cfg(not(feature = "unbounded"))]
     queue: Arc<crossbeam_queue::ArrayQueue<Runnable>>,
-    #[cfg(not(feature = "crossbeam-queue"))]
-    queue: Arc<heapless::mpmc::MpMcQueue<Runnable, C>>,
     wakeup: W,
     poll_runnable_waker: AtomicWaker,
     _marker: PhantomData<core::cell::UnsafeCell<&'a Rc<()>>>,
@@ -279,10 +279,10 @@ where
     /// Creates a new executor instance using the provided `Wakeup` instance.
     pub fn wrap(wakeup: W) -> Self {
         Self {
-            #[cfg(feature = "crossbeam-queue")]
+            #[cfg(feature = "unbounded")]
+            queue: Arc::new(crossbeam_queue::SegQueue::new()),
+            #[cfg(not(feature = "unbounded"))]
             queue: Arc::new(crossbeam_queue::ArrayQueue::new(C)),
-            #[cfg(not(feature = "crossbeam-queue"))]
-            queue: Arc::new(heapless::mpmc::MpMcQueue::<_, C>::new()),
             wakeup,
             poll_runnable_waker: AtomicWaker::new(),
             _marker: PhantomData,
@@ -321,14 +321,14 @@ where
             let wake = self.wakeup.waker();
 
             move |runnable| {
-                #[cfg(feature = "crossbeam-queue")]
+                #[cfg(feature = "unbounded")]
                 {
-                    queue.push(runnable).unwrap();
+                    queue.push(runnable);
                 }
 
-                #[cfg(not(feature = "crossbeam-queue"))]
+                #[cfg(not(feature = "unbounded"))]
                 {
-                    queue.enqueue(runnable).unwrap();
+                    queue.push(runnable).unwrap();
                 }
 
                 wake.wake_by_ref();
@@ -349,19 +349,7 @@ where
     /// - `Some(Runnnable)` - the first task scheduled for execution. Calling `Runnable::run` will
     ///    execute the task. In other words, it will poll its future.
     fn try_runnable(&self) -> Option<Runnable> {
-        let runnable;
-
-        #[cfg(feature = "crossbeam-queue")]
-        {
-            runnable = self.queue.pop();
-        }
-
-        #[cfg(not(feature = "crossbeam-queue"))]
-        {
-            runnable = self.queue.dequeue();
-        }
-
-        runnable
+        self.queue.pop()
     }
 
     /// Polls the first task scheduled for execution by the executor.
