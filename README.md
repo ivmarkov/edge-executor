@@ -6,14 +6,14 @@
 
 This crate ships a minimal async executor suitable for microcontrollers.
 
-The implementation is a thin wrapper around [smol](::smol)'s [async-task](::async-task) crate.
+The implementation is a thin wrapper around [smol](https://github.com/smol-rs/smol)'s [async-task](https://github.com/smol-rs/async-task) crate.
 
 **Highlights**
 
-- `no_std` (but does need `alloc`; for a `no_std` *and* "no_alloc" executor, look at [Embassy](::embassy), which statically pre-allocates all tasks);
+- `no_std` (but does need `alloc`; for a `no_std` *and* "no_alloc" executor, look at [embassy-executor](https://github.com/embassy-rs/embassy/tree/main/embassy-executor), which statically pre-allocates all tasks);
            (note also that the executor uses allocations in a limited way: when a new task is being spawn, as well as the executor itself);
 
-- Follow closely the API of [smol](::smol)'s [async-executor](::async-executor) crate, so that it can serve as a (mostly) drop-in replacement;
+- Follow closely the API of [smol](https://github.com/smol-rs/smol)'s [async-executor](https://github.com/smol-rs/async-executor) (`async_executor::LocalExecutor` specifically), so that it can serve as a (mostly) drop-in replacement;
 
 - Does not assume an RTOS and can run completely bare-metal (or on top of an RTOS);
 
@@ -31,4 +31,4 @@ The implementation is a thin wrapper around [smol](::smol)'s [async-task](::asyn
 
 - `WasmWakeup` implementation for the WASM event loop, compatible with WASM;
 
-- `EventLoopWakeup` implementation for native event loops like those of GLIB, the Matter C++ SDK and others.
+- `CEventLoopWakeup` implementation for native event loops like those of GLIB, the Matter C++ SDK and others.
