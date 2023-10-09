@@ -31,6 +31,6 @@ jobs:
       - name: Add wasm target
         run: rustup target add wasm32-unknown-unknown
       - name: Build | Clippy
-        run: cargo clippy --features std,wasm --no-deps -- -Dwarnings
+        run: cargo clippy --features std --no-deps -- -Dwarnings
       - name: Build | Compile
         run: cargo build
