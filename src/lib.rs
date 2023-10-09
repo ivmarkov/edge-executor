@@ -72,8 +72,7 @@ where
 }
 
 /// `Wakeup` instances that provide a "sleep" facility need to also implement this trait.
-/// Most `Wakeup` implementations should typically implement it, which enables
-/// the `LocalExecutor::run` method.
+/// Most `Wakeup` implementations should typically implement it.
 ///
 /// What `Wait::run` does is to - in a loop - call `wait()` on the wakeup instance.
 /// Once awoken from `wait()` (which means a task `Waker` was awoken and it scheduled its task and called `Wake::wake`),
@@ -81,7 +80,7 @@ where
 /// Once the scheduled tasks' queue is empty again, the executor calls `wait()` again.
 ///
 /// Notable exceptions are event-loop based monitors like WASM and others
-/// where the executor is scheduled once (via `LocalExecutor::schedule`) and then
+/// where the executor is scheduled once and then
 /// re-scheduled for execution on the event loop when awoken.
 pub trait Wait: Wakeup {
     fn wait(&self);
@@ -135,8 +134,6 @@ where
 /// are to be scheduled on an event-loop and thus do not follow the
 /// "sleep the executor current thread until notified and then run the executor in the thread"
 /// pattern, achieved by implementing the `Wait` trait.
-///
-/// Enables the `LocalExecutor::schedule` method.
 pub trait Schedule: Wakeup {
     fn schedule_poll_fn<P>(&self, poll_fn: P)
     where
@@ -279,9 +276,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// use edge_executor::LocalExecutor;
+    /// use edge_executor::{LocalExecutor, PlatformWakeup};
     ///
-    /// let local_ex = LocalExecutor::new();
+    /// let local_ex = LocalExecutor::<PlatformWakeup>::new();
     ///
     /// let task = local_ex.spawn(async {
     ///     println!("Hello world");
@@ -367,9 +364,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// use edge_executor::LocalExecutor;
+    /// use edge_executor::{LocalExecutor, PlatformWakeup};
     ///
-    /// let ex = LocalExecutor::new();
+    /// let ex = LocalExecutor::<PlatformWakeup>::new();
     /// assert!(!ex.try_tick()); // no tasks to run
     ///
     /// let task = ex.spawn(async {
@@ -396,9 +393,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// use edge_executor::{LocalExecutor, StdWakeup, Wait};
+    /// use edge_executor::{LocalExecutor, PlatformWakeup, Wait};
     ///
-    /// let ex = LocalExecutor::<StdWakeup>::new();
+    /// let ex = LocalExecutor::<PlatformWakeup>::new();
     ///
     /// let task = ex.spawn(async {
     ///     println!("Hello world");
@@ -414,9 +411,9 @@ where
     /// # Examples
     ///
     /// ```
-    /// use edge_executor::{LocalExecutor, StdWakeup, Wait};
+    /// use edge_executor::{LocalExecutor, PlatformWakeup, Wait};
     ///
-    /// let local_ex = LocalExecutor::<StdWakeup>::new();
+    /// let local_ex = LocalExecutor::<PlatformWakeup>::new();
     ///
     /// let task = local_ex.spawn(async { 1 + 2 });
     /// let res = local_ex.wakeup().block_on(local_ex.run(async { task.await * 2 }));
@@ -638,11 +635,11 @@ mod wasm {
         closure: Option<Closure<dyn FnMut(JsValue)>>,
     }
 
-    /// A `Wake` instance for web-assembly (WASM) based browser targets.
+    /// A `Wakeup` instance for web-assembly (WASM) based targets.
     ///
-    /// Works by integrating the wake instance (and thus the executor) into the browser event loop.
+    /// Works by integrating the wake instance (and thus the executor) into the WASM event loop.
     ///
-    /// Tasks are scheduled for execution in the browser event loop, by turning those into JavaScript Promises.
+    /// Tasks are scheduled for execution in the event loop, by turning those into JavaScript Promises.
     pub struct WasmWakeup(Arc<WasmWake>, PhantomData<*const ()>);
 
     impl WasmWakeup {
