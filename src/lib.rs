@@ -29,8 +29,8 @@ pub use crate::espidf::*;
 #[cfg(feature = "wasm")]
 pub use crate::wasm::*;
 
-/// This trait captures the notion of an executor wakeup
-/// that needs to happen once a waker is awoken using `Waker::wake()`.
+/// This trait captures the notion of an execution wakeup that needs to happen
+/// once a waker is awoken using `Waker::wake()`.
 ///
 /// The implementation of the trait is operating system and
 /// execution approach-specific. Some examples:
@@ -71,11 +71,11 @@ where
     }
 }
 
-/// `Wakeup` instances that provide a "sleep" facility to the executor need to also
-/// implement this trait. Most `Wakeup` implementations should typically implement it, which enables
+/// `Wakeup` instances that provide a "sleep" facility need to also implement this trait.
+/// Most `Wakeup` implementations should typically implement it, which enables
 /// the `LocalExecutor::run` method.
 ///
-/// What `LocalExecutor::run` does is to - in a loop - call `wait()` on the wake instance.
+/// What `Wait::run` does is to - in a loop - call `wait()` on the wakeup instance.
 /// Once awoken from `wait()` (which means a task `Waker` was awoken and it scheduled its task and called `Wake::wake`),
 /// the executor runs all tasks which had been scheduled to run by their awoken wakers.
 /// Once the scheduled tasks' queue is empty again, the executor calls `wait()` again.
@@ -83,8 +83,34 @@ where
 /// Notable exceptions are event-loop based monitors like WASM and others
 /// where the executor is scheduled once (via `LocalExecutor::schedule`) and then
 /// re-scheduled for execution on the event loop when awoken.
-pub trait Wait {
+pub trait Wait: Wakeup {
     fn wait(&self);
+
+    /// Executes the supplied future on the current thread, thus blocking it until the future becomes ready.
+    fn block_on<F>(&self, mut fut: F) -> F::Output
+    where
+        Self: Wait,
+        F: Future,
+    {
+        log::trace!("block_on(): started");
+
+        let mut fut = pin!(fut);
+
+        let waker = self.waker().into();
+
+        let mut cx = Context::from_waker(&waker);
+
+        let res = loop {
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(res) => break res,
+                Poll::Pending => self.wait(),
+            }
+        };
+
+        log::trace!("block_on(): finished");
+
+        res
+    }
 }
 
 impl<T> Wait for &T
@@ -111,21 +137,56 @@ where
 /// pattern, achieved by implementing the `Wait` trait.
 ///
 /// Enables the `LocalExecutor::schedule` method.
-pub trait Schedule {
-    fn schedule<P>(&self, poll_fn: P)
+pub trait Schedule: Wakeup {
+    fn schedule_poll_fn<P>(&self, poll_fn: P)
     where
         P: FnMut() -> bool + 'static;
+
+    /// Schedules the future in the background and runs it until it becomes ready.
+    /// At the end of the execution, calls the `on_complete` callback.
+    fn schedule<F, R>(&self, fut: F, on_complete: R)
+    where
+        F: Future + 'static,
+        R: FnOnce(F::Output) + 'static,
+    {
+        log::trace!("schedule(): started");
+
+        let mut fut = alloc::boxed::Box::pin(fut);
+        let mut on_complete = Some(on_complete);
+        let wake = self.waker();
+
+        let poll_fn = move || {
+            let waker = Waker::from(wake.clone());
+            let mut cx = Context::from_waker(&waker);
+
+            if let Some(on_complete) = on_complete.take() {
+                match fut.as_mut().poll(&mut cx) {
+                    Poll::Ready(res) => {
+                        on_complete(res);
+
+                        log::trace!("schedule(): finished");
+                        true
+                    }
+                    Poll::Pending => false,
+                }
+            } else {
+                true
+            }
+        };
+
+        self.schedule_poll_fn(poll_fn);
+    }
 }
 
 impl<T> Schedule for &T
 where
     T: Schedule,
 {
-    fn schedule<P>(&self, poll_fn: P)
+    fn schedule_poll_fn<P>(&self, poll_fn: P)
     where
         P: FnMut() -> bool + 'static,
     {
-        (*self).schedule(poll_fn)
+        (*self).schedule_poll_fn(poll_fn)
     }
 }
 
@@ -133,11 +194,11 @@ impl<T> Schedule for &mut T
 where
     T: Schedule,
 {
-    fn schedule<P>(&self, poll_fn: P)
+    fn schedule_poll_fn<P>(&self, poll_fn: P)
     where
         P: FnMut() -> bool + 'static,
     {
-        (**self).schedule(poll_fn)
+        (**self).schedule_poll_fn(poll_fn)
     }
 }
 
@@ -152,16 +213,21 @@ where
 ///
 /// - Does not assume an RTOS and can run completely bare-metal (or on top of an RTOS);
 ///
-/// - Pluggable [Notification] mechanism which makes it ISR-friendly, i.e. tasks can be woken up (and thus re-scheduled) from within an ISR
+/// - Local execution only. No plans for implementing work-stealing execution, as threads are either a scarce resource on microcontrollers' RTOS,
+///   or do not exist at all (Rust bare-metal);
+///
+/// - Pluggable [Wakeup] mechanism which makes it ISR-friendly, i.e. tasks can be woken up (and thus re-scheduled) from within an ISR
 ///   (feature `wake-from-isr` should be enabled);
 ///
-/// - Out of the box [Notification] implementation based on condvar, compatible with Rust STD
+/// - [StdWakeup] implementation based on a mutex + condvar pair, compatible with Rust STD
 ///   (for cases where notifying from / running in ISRs is not important);
 ///
-/// - Out of the box [Notification] implementation based on WASM event loop, compatible with WASM
+/// - [EspWakeup] implementation for ESP-IDF based on FreeRTOS task notifications, compatible with the `wake-from-isr` feature;
 ///
-/// - Out of the box [Notification] implementation for ESP-IDF based on FreeRTOS task notifications, compatible with the `wake-from-isr` feature.
-pub struct LocalExecutor<'a, const C: usize, W> {
+/// - [WasmWakeup] implementation for the WASM event loop, compatible with WASM;
+///
+/// - [EventLoopWakeup] implementation for native event loops like those of GLIB, the Matter C++ SDK and others.
+pub struct LocalExecutor<'a, W, const C: usize = 64> {
     #[cfg(feature = "crossbeam-queue")]
     queue: Arc<crossbeam_queue::ArrayQueue<Runnable>>,
     #[cfg(not(feature = "crossbeam-queue"))]
@@ -172,12 +238,12 @@ pub struct LocalExecutor<'a, const C: usize, W> {
 }
 
 #[allow(clippy::missing_safety_doc)]
-impl<'a, const C: usize, W> LocalExecutor<'a, C, W>
+impl<'a, const C: usize, W> LocalExecutor<'a, W, C>
 where
     W: Wakeup,
 {
     /// Creates a new executor instance using the provided `Wakeup` type.
-    /// The monitor type needs to implement `Default`.
+    /// The wakeup type needs to implement `Default`.
     pub fn new() -> Self
     where
         W: Default,
@@ -198,26 +264,32 @@ where
         }
     }
 
-    /// Spawns a new task for the supplied future.
+    /// Returns a reference to the `Wakeup` instance owned by this executor.
+    pub fn wakeup(&self) -> &W {
+        &self.wakeup
+    }
+
+    /// Spawns a task onto the executor.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use edge_executor::LocalExecutor;
+    ///
+    /// let local_ex = LocalExecutor::new();
+    ///
+    /// let task = local_ex.spawn(async {
+    ///     println!("Hello world");
+    /// });
+    /// ```
     ///
     /// Note that if the executor's queue size is equal to the number of currently
     /// spawned and running tasks, spawning this additional task might cause the executor to panic
     /// later, when the task is scheduled for polling.
-    pub fn spawn<F, T>(&self, fut: F) -> Task<T>
+    pub fn spawn<F>(&self, fut: F) -> Task<F::Output>
     where
-        F: Future<Output = T> + Send + 'a,
-        T: 'a,
-    {
-        unsafe { self.spawn_unchecked(fut) }
-    }
-
-    /// Unsafely spawns a new task for the supplied future.
-    ///
-    /// This method is unsafe because it is not checking whether the future lives as long
-    /// as the executor.
-    unsafe fn spawn_unchecked<F, T>(&self, fut: F) -> Task<T>
-    where
-        F: Future<Output = T>,
+        F: Future + 'a,
+        F::Output: 'a,
     {
         let schedule = {
             let queue = self.queue.clone();
@@ -238,7 +310,7 @@ where
             }
         };
 
-        let (runnable, task) = async_task::spawn_unchecked(fut, schedule);
+        let (runnable, task) = unsafe { async_task::spawn_unchecked(fut, schedule) };
 
         runnable.schedule();
 
@@ -283,11 +355,23 @@ where
         poll_fn(|ctx| self.poll_runnable(ctx)).await
     }
 
-    /// Polls the executor once and thus runs one task from those which had been scheduled to run by their wakers.
+    /// Attempts to run a task if at least one is scheduled.
     ///
-    /// Returns
-    /// `false` if no tasks had been scheduled for execution.
-    /// `true` if a task was scheduled for execution and executed.
+    /// Running a scheduled task means simply polling its future once.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use edge_executor::LocalExecutor;
+    ///
+    /// let ex = LocalExecutor::new();
+    /// assert!(!ex.try_tick()); // no tasks to run
+    ///
+    /// let task = ex.spawn(async {
+    ///     println!("Hello world");
+    /// });
+    /// assert!(ex.try_tick()); // a task was found
+    /// ```    
     pub fn try_tick(&self) -> bool {
         if let Some(runnable) = self.try_runnable() {
             runnable.run();
@@ -298,23 +382,45 @@ where
         }
     }
 
-    /// Polls the executor and runs all tasks which had been scheduled to run by their wakers.
-    /// Stops polling once `condition` becomes `false` OR when there are no more tasks scheduled for execution in the queue.
+    /// Runs a single task asynchronously.
     ///
-    /// Returns
-    /// `Poll::Pending` when all tasks (if any) in the queue had been executed
-    /// `Poll::Ready<()>` if `condition` became `false` in the meantime
+    /// Running a task means simply polling its future once.
+    ///
+    /// If no tasks are scheduled when this method is called, it will wait until one is scheduled.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use edge_executor::{LocalExecutor, StdWakeup};
+    ///
+    /// let ex = LocalExecutor::<StdWakeup>::new();
+    ///
+    /// let task = ex.spawn(async {
+    ///     println!("Hello world");
+    /// });
+    /// ex.wakeup().block_on(ex.tick()); // runs the task
+    /// ```
     pub async fn tick(&self) {
         self.runnable().await.run();
     }
 
-    /// Continuously runs the executor while `condition` holds `true`.
+    /// Runs the executor asynchronously until the given future completes.
     ///
-    /// This method requires that the `Monitor` instance used by the executor implements the `Wait` trait.
-    /// In other words, the monitor should be capable of providing "sleep" functionality to the executor.
-    pub async fn run<F, T>(&self, fut: F) -> T
+    /// # Examples
+    ///
+    /// ```
+    /// use edge_executor::{LocalExecutor, StdWakeup};
+    ///
+    /// let local_ex = LocalExecutor::<StdWakeup>::new();
+    ///
+    /// let task = local_ex.spawn(async { 1 + 2 });
+    /// let res = local_ex.wakeup().block_on(local_ex.run(async { task.await * 2 }));
+    ///
+    /// assert_eq!(res, 6);
+    /// ```
+    pub async fn run<F>(&self, fut: F) -> F::Output
     where
-        F: Future<Output = T>,
+        F: Future,
     {
         let run_forever = async {
             loop {
@@ -324,123 +430,11 @@ where
 
         run_forever.or(fut).await
     }
-
-    pub fn block_on<F, T>(&self, fut: F) -> F::Output
-    where
-        F: Future,
-        W: Wait,
-    {
-        Blocker::wrap(&self.wakeup).block_on(self.run(fut))
-    }
-
-    /// Starts the executor in the background and runs it until `condition` holds `true`.
-    /// At the end of the execution, calls the `finished` callback.
-    ///
-    /// This method requires that the `Monitor` instance used by the executor implements the `Start` trait.
-    /// This trait is typically provided by monitors which allow embedding the executor in an event loop,
-    /// similar to the browser/WASM event loop.
-    pub fn schedule<F, R>(&'static self, fut: F, on_complete: R)
-    where
-        F: Future + 'static,
-        R: FnOnce(F::Output) + 'static,
-        W: Schedule + Send,
-    {
-        let mut fut = alloc::boxed::Box::pin(self.run(fut));
-        let mut on_complete = Some(on_complete);
-        let wake = self.wakeup.waker();
-
-        let cb = move || {
-            let waker = Waker::from(wake.clone());
-            let mut cx = Context::from_waker(&waker);
-
-            if let Some(on_complete) = on_complete.take() {
-                match fut.as_mut().poll(&mut cx) {
-                    Poll::Ready(res) => {
-                        on_complete(res);
-                        true
-                    }
-                    Poll::Pending => false,
-                }
-            } else {
-                true
-            }
-        };
-
-        self.wakeup.schedule(cb);
-    }
-
-    /// Waits for one or more tasks to be scheduled for execution.
-    ///
-    /// This method requires that the `Monitor` instance used by the executor implements the `Wait` trait.
-    /// In other words, the monitor should be capable of providing "sleep" functionality to the executor.
-    pub fn wait(&self)
-    where
-        W: Wait,
-    {
-        self.wakeup.wait();
-    }
 }
 
-impl<'a, const C: usize, W> Default for LocalExecutor<'a, C, W>
+impl<'a, W, const C: usize> Default for LocalExecutor<'a, W, C>
 where
     W: Wakeup + Default,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// A very simple executor that can execute - on the current thread - a single future.
-#[derive(Clone)]
-pub struct Blocker<W>(W);
-
-impl<W> Blocker<W>
-where
-    W: Wakeup + Wait,
-{
-    /// Creates a new executor instance using the provided `Monitor` type.
-    /// The monitor type needs to implement `Default`.
-    pub fn new() -> Self
-    where
-        W: Default,
-    {
-        Self(Default::default())
-    }
-
-    /// Creates a new executor instance using the provided `Monitor` instance.
-    pub const fn wrap(wakeup: W) -> Self {
-        Self(wakeup)
-    }
-
-    /// Executes the supplied future on the current thread, thus blocking it until the future becomes ready.
-    pub fn block_on<F>(&self, mut fut: F) -> F::Output
-    where
-        F: Future,
-    {
-        log::trace!("block_on(): started");
-
-        let mut fut = pin!(fut);
-
-        let waker = self.0.waker().into();
-
-        let mut cx = Context::from_waker(&waker);
-
-        let res = loop {
-            match fut.as_mut().poll(&mut cx) {
-                Poll::Ready(res) => break res,
-                Poll::Pending => self.0.wait(),
-            }
-        };
-
-        log::trace!("block_on(): finished");
-
-        res
-    }
-}
-
-impl<N> Default for Blocker<N>
-where
-    N: Wakeup + Wait + Default,
 {
     fn default() -> Self {
         Self::new()
@@ -636,7 +630,7 @@ mod eventloop {
     where
         S: Fn(Callback, Arg) + 'static,
     {
-        fn schedule<P>(&self, poll_fn: P)
+        fn schedule_poll_fn<P>(&self, poll_fn: P)
         where
             P: FnMut() -> bool + 'static,
         {
@@ -699,7 +693,7 @@ mod espidf {
 
     pub use super::*;
 
-    pub type EspExecutor<'a, const C: usize, S> = LocalExecutor<'a, C, EspWakeup>;
+    pub type EspExecutor<'a, S, const C: usize> = LocalExecutor<'a, EspWakeup, C>;
     pub type EspBlocker = Blocker<EspWakeup>;
 
     pub type EspWakeup = notification::Notification;
