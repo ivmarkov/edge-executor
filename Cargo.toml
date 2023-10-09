@@ -38,6 +38,3 @@ js-sys = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 simple_logger = "2.2"
-
-[build-dependencies]
-embuild = "0.31.2"
