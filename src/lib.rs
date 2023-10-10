@@ -273,6 +273,12 @@ impl<'a, const C: usize> Executor<'a, C> {
     }
 }
 
+impl<'a, const C: usize> Default for Executor<'a, C> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 unsafe impl<'a, const C: usize> Send for Executor<'a, C> {}
 unsafe impl<'a, const C: usize> Sync for Executor<'a, C> {}
 
@@ -401,5 +407,11 @@ impl<'a, const C: usize> LocalExecutor<'a, C> {
         F: Future,
     {
         unsafe { self.executor.run_unchecked(fut) }.await
+    }
+}
+
+impl<'a, const C: usize> Default for LocalExecutor<'a, C> {
+    fn default() -> Self {
+        Self::new()
     }
 }
