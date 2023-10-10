@@ -4,31 +4,27 @@
 ![crates.io](https://img.shields.io/crates/v/edge-executor.svg)
 [![Documentation](https://docs.rs/edge-executor/badge.svg)](https://docs.rs/edge-executor)
 
-This crate ships a minimal async executor suitable for microcontrollers.
+This crate ships a minimal async executor suitable for microcontrollers and embedded systems in general.
 
-The implementation is a thin wrapper around [smol](https://github.com/smol-rs/smol)'s [async-task](https://github.com/smol-rs/async-task) crate.
+A `no_std` drop-in replacement for [smol](https://github.com/smol-rs/smol)'s [async-executor](https://github.com/smol-rs/async-executor), with the implementation being a thin wrapper around [smol](https://github.com/smol-rs/smol)'s [async-task](https://github.com/smol-rs/async-task) as well.
 
 **Highlights**
 
-- `no_std` (but does need `alloc`; for a `no_std` *and* "no_alloc" executor, look at [embassy-executor](https://github.com/embassy-rs/embassy/tree/main/embassy-executor), which statically pre-allocates all tasks);
-           (note also that the executor uses allocations in a limited way: when a new task is being spawn, as well as the executor itself);
+- `no_std` (but does need `alloc`); for a `no_std` *and* "no_alloc" executor, look at [embassy-executor](https://github.com/embassy-rs/embassy/tree/main/embassy-executor), which statically pre-allocates all tasks;
+  (note also that the executor uses allocations in a limited way: when a new task is being spawn, as well as during the construction of the executor itself);
 
-- Follow closely the API of [smol](https://github.com/smol-rs/smol)'s [async-executor](https://github.com/smol-rs/async-executor) (`async_executor::LocalExecutor` specifically), so that it can serve as a (mostly) drop-in replacement;
+- Works on targets which have no `core::sync::atomic` support, thanks to [portable-atomic](https://github.com/taiki-e/portable-atomic);
 
-- Does not assume an RTOS and can run completely bare-metal (or on top of an RTOS);
+- Does not assume an RTOS and can run completely bare-metal too;
 
-- Local execution only. No plans for implementing work-stealing execution, as threads are either a scarce resource on microcontrollers' RTOS,
-  or do not exist at all (Rust bare-metal);
+- Lockless, atomic-based, bounded task queue by default, which works well for waking the executor directly from an ISR on e.g. FreeRTOS or ESP-IDF (unbounded also an option with feature `unbounded`, yet that might mean potential allocations in an ISR context, which should be avoided).
 
-- Pluggable `Wakeup` mechanism which makes it customizable for different microcontrollers;
+**Useful features inspired from [async-executor](https://github.com/smol-rs/async-executor)**:
 
-- ISR-friendly, i.e. tasks can be woken up (and thus re-scheduled) from within an ISR
-  (feature `wake-from-isr` should be enabled);
+- Futures spawned on `edge_executor::LocalExecutor` need to live only as long as the executor itself, which enables stack borrows;
 
-- `StdWakeup` implementation based on a mutex + condvar pair, usable on top of the Rust Standard Library;
+- Completely portable and async. `Executor::run` simply returns a `Future`. Polling this future runs the executor, i.e. `block_on(executor.run(core::task:forever::<()>()))`;
 
-- `EspWakeup` implementation for ESP-IDF based on FreeRTOS task notifications, compatible with the `wake-from-isr` feature;
+**TODO**:
 
-- `WasmWakeup` implementation for the WASM event loop, compatible with WASM;
-
-- `CEventLoopWakeup` implementation for native event loops like those of GLIB, the Matter C++ SDK and others.
+Upstream the `portable-atomic` dependency into `async-task` (and possibly into `crossbeam-queue`) so that the crate can compile on targets that do not support `core::sync` atomics.

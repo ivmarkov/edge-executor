@@ -2,8 +2,7 @@
 name = "edge-executor"
 version = "0.3.1"
 authors = ["Ivan Markov <ivan.markov@gmail.com>"]
-edition = "2018"
-resolver = "2"
+edition = "2021"
 categories = ["embedded", "hardware-support"]
 keywords = ["embedded", "async", "executor"]
 description = "Async executor suitable for embedded environments."
@@ -14,27 +13,19 @@ readme = "README.md"
 [patch.crates-io]
 esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys" }
 esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal" }
+async-task = { git = "https://github.com/ivmarkov/async-task" }
 
 [features]
 default = ["std"]
-std = []
+std = ["futures-lite/std"]
 unbounded = []
+portable-atomic = ["dep:portable-atomic", "portable-atomic-util", "atomic-waker/portable-atomic", "async-task/portable-atomic"]
 
 [dependencies]
+heapless = { version = "0.7", default-featgures = false, features = ["cas"], optional = true }
+portable-atomic = { version = "1.4", features = ["critical-section"], optional = true }
+portable-atomic-util = { version = "0.1", default-features = false, features = ["alloc"], optional = true }
 crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }
 async-task = { version = "4", default-features = false }
 atomic-waker = { version = "1", default-features = false }
 futures-lite = { version = "1", default-features = false }
-log = { version = "0.4", default-features = false }
-
-# ESP-IDF dependencies
-[target.'cfg(target_os = "espidf")'.dependencies]
-esp-idf-hal = { version = "0.41", default-features = false }
-
-# WASM dependencies
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = { version = "0.2.82", default-features = false }
-js-sys = { version = "0.3", default-features = false }
-
-[dev-dependencies]
-simple_logger = "2.2"
