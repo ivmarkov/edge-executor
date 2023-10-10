@@ -34,3 +34,5 @@ jobs:
         run: cargo clippy --features std --no-deps -- -Dwarnings
       - name: Build | Compile
         run: cargo build
+      - name: Build | Test
+        run: cargo test
