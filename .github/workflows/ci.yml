@@ -26,6 +26,8 @@ jobs:
           components: rustfmt, clippy
       - name: Setup
         run: rustup default ${{ env.rust_toolchain }}
+      - name: Add targets
+        run: rustup target add riscv32imc-unknown-none-elf
       - name: Build | Fmt Check
         run: cargo fmt -- --check
       - name: Add wasm target
