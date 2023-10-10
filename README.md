@@ -10,8 +10,9 @@ A `no_std` drop-in replacement for [smol](https://github.com/smol-rs/smol)'s [as
 
 **Highlights**
 
-- `no_std` (but does need `alloc`); for a `no_std` *and* "no_alloc" executor, look at [embassy-executor](https://github.com/embassy-rs/embassy/tree/main/embassy-executor), which statically pre-allocates all tasks;
-  (note also that the executor uses allocations in a limited way: when a new task is being spawn, as well as during the construction of the executor itself);
+- `no_std` (but does need `alloc`):
+  - `edge_executor` uses allocations in a limited way: when a new task is being spawn, as well as during the construction of the executor itself;
+  - For a `no_std` *and* "no_alloc" executor, look at [embassy-executor](https://github.com/embassy-rs/embassy/tree/main/embassy-executor), which statically pre-allocates all tasks.
 
 - Works on targets which have no `core::sync::atomic` support, thanks to [portable-atomic](https://github.com/taiki-e/portable-atomic);
 
@@ -19,7 +20,7 @@ A `no_std` drop-in replacement for [smol](https://github.com/smol-rs/smol)'s [as
 
 - Lockless, atomic-based, bounded task queue by default, which works well for waking the executor directly from an ISR on e.g. FreeRTOS or ESP-IDF (unbounded also an option with feature `unbounded`, yet that might mean potential allocations in an ISR context, which should be avoided).
 
-**Useful features inspired from [async-executor](https://github.com/smol-rs/async-executor)**:
+**Useful features inspired by [async-executor](https://github.com/smol-rs/async-executor)**:
 
 - Futures spawned on `edge_executor::LocalExecutor` need to live only as long as the executor itself, which enables stack borrows;
 
