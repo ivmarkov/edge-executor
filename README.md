@@ -11,7 +11,7 @@ A `no_std` drop-in replacement for [smol](https://github.com/smol-rs/smol)'s [as
 **Highlights**
 
 - `no_std` (but does need `alloc`):
-  - `edge_executor` uses allocations in a limited way: when a new task is being spawn, as well as during the construction of the executor itself;
+  - The executor uses allocations in a controlled way: only when a new task is being spawn, as well as during the construction of the executor itself;
   - For a `no_std` *and* "no_alloc" executor, look at [embassy-executor](https://github.com/embassy-rs/embassy/tree/main/embassy-executor), which statically pre-allocates all tasks.
 
 - Works on targets which have no `core::sync::atomic` support, thanks to [portable-atomic](https://github.com/taiki-e/portable-atomic);
