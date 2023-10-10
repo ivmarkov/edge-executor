@@ -63,7 +63,7 @@ pub struct Executor<'a, const C: usize = 64> {
     #[cfg(feature = "heapless")]
     queue: Arc<heapless::mpmc::MpMcQueue<Runnable, C>>,
     waker: Arc<AtomicWaker>,
-    _invariant: PhantomData<std::cell::UnsafeCell<&'a ()>>,
+    _invariant: PhantomData<core::cell::UnsafeCell<&'a ()>>,
 }
 
 impl<'a, const C: usize> Executor<'a, C> {
