@@ -22,7 +22,7 @@ A `no_std` drop-in replacement for [smol](https://github.com/smol-rs/smol)'s [as
 
 **Great features carried over from [async-executor](https://github.com/smol-rs/async-executor)**:
 
-- Futures spawned on the executor need to live only as long as the executor itself, which enables stack borrows;
+- Stack borrows: futures spawned on the executor need to live only as long as the executor itself. No `F: Future + 'static` constraints;
 
 - Completely portable and async. `Executor::run` simply returns a `Future`. Polling this future runs the executor, i.e. `block_on(executor.run(core::task:forever::<()>()))`;
 
