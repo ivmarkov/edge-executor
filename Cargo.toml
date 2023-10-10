@@ -11,8 +11,6 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 
 [patch.crates-io]
-esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys" }
-esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal" }
 async-task = { git = "https://github.com/ivmarkov/async-task" }
 
 [features]
@@ -22,7 +20,7 @@ unbounded = []
 portable-atomic = ["dep:portable-atomic", "portable-atomic-util", "atomic-waker/portable-atomic", "async-task/portable-atomic"]
 
 [dependencies]
-heapless = { version = "0.7", default-featgures = false, features = ["cas"], optional = true }
+heapless = { version = "0.7", default-features = false, features = ["cas"], optional = true }
 portable-atomic = { version = "1.4", features = ["critical-section"], optional = true }
 portable-atomic-util = { version = "0.1", default-features = false, features = ["alloc"], optional = true }
 crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }

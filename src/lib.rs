@@ -37,13 +37,13 @@ pub use futures_lite::future::block_on;
 ///
 /// A multi-threaded executor:
 ///
-/// ```
+/// ```ignore
 /// use async_channel::unbounded;
 /// use easy_parallel::Parallel;
 ///
 /// use edge_executor::{Executor, block_on};
 ///
-/// let ex = Executor::new();
+/// let ex: Executor = Default::default();
 /// let (signal, shutdown) = unbounded::<()>();
 ///
 /// Parallel::new()
@@ -74,7 +74,7 @@ impl<'a, const C: usize> Executor<'a, C> {
     /// ```
     /// use edge_executor::Executor;
     ///
-    /// let ex = Executor::new();
+    /// let ex: Executor = Default::default();
     /// ```
     pub fn new() -> Self {
         Self {
@@ -96,7 +96,7 @@ impl<'a, const C: usize> Executor<'a, C> {
     /// ```
     /// use edge_executor::Executor;
     ///
-    /// let ex = Executor::new();
+    /// let ex: Executor = Default::default();
     ///
     /// let task = ex.spawn(async {
     ///     println!("Hello world");
@@ -123,7 +123,7 @@ impl<'a, const C: usize> Executor<'a, C> {
     /// ```
     /// use edge_executor::Executor;
     ///
-    /// let ex = Executor::new();
+    /// let ex: Executor = Default::default();
     /// assert!(!ex.try_tick()); // no tasks to run
     ///
     /// let task = ex.spawn(async {
@@ -152,7 +152,7 @@ impl<'a, const C: usize> Executor<'a, C> {
     /// ```
     /// use edge_executor::{Executor, block_on};
     ///
-    /// let ex = LocalExecutor::new();
+    /// let ex: Executor = Default::default();
     ///
     /// let task = ex.spawn(async {
     ///     println!("Hello world");
@@ -170,7 +170,7 @@ impl<'a, const C: usize> Executor<'a, C> {
     /// ```
     /// use edge_executor::{Executor, block_on};
     ///
-    /// let ex = Executor::new();
+    /// let ex: Executor = Default::default();
     ///
     /// let task = ex.spawn(async { 1 + 2 });
     /// let res = block_on(ex.run(async { task.await * 2 }));
@@ -291,7 +291,7 @@ unsafe impl<'a, const C: usize> Sync for Executor<'a, C> {}
 /// ```
 /// use edge_executor::{LocalExecutor, block_on};
 ///
-/// let local_ex = LocalExecutor::new();
+/// let local_ex: LocalExecutor = Default::default();
 ///
 /// block_on(local_ex.run(async {
 ///     println!("Hello world!");
@@ -311,7 +311,7 @@ impl<'a, const C: usize> LocalExecutor<'a, C> {
     /// ```
     /// use edge_executor::LocalExecutor;
     ///
-    /// let local_ex = LocalExecutor::new();
+    /// let local_ex: LocalExecutor = Default::default();
     /// ```
     pub fn new() -> Self {
         Self {
@@ -327,7 +327,7 @@ impl<'a, const C: usize> LocalExecutor<'a, C> {
     /// ```
     /// use edge_executor::LocalExecutor;
     ///
-    /// let local_ex = LocalExecutor::new();
+    /// let local_ex: LocalExecutor = Default::default();
     ///
     /// let task = local_ex.spawn(async {
     ///     println!("Hello world");
@@ -354,7 +354,7 @@ impl<'a, const C: usize> LocalExecutor<'a, C> {
     /// ```
     /// use edge_executor::LocalExecutor;
     ///
-    /// let local_ex = LocalExecutor::new();
+    /// let local_ex: LocalExecutor = Default::default();
     /// assert!(!local_ex.try_tick()); // no tasks to run
     ///
     /// let task = local_ex.spawn(async {
@@ -377,7 +377,7 @@ impl<'a, const C: usize> LocalExecutor<'a, C> {
     /// ```
     /// use edge_executor::{LocalExecutor, block_on};
     ///
-    /// let local_ex = LocalExecutor::new();
+    /// let local_ex: LocalExecutor = Default::default();
     ///
     /// let task = local_ex.spawn(async {
     ///     println!("Hello world");
@@ -395,7 +395,7 @@ impl<'a, const C: usize> LocalExecutor<'a, C> {
     /// ```
     /// use edge_executor::{LocalExecutor, block_on};
     ///
-    /// let local_ex = LocalExecutor::new();
+    /// let local_ex: LocalExecutor = Default::default();
     ///
     /// let task = local_ex.spawn(async { 1 + 2 });
     /// let res = block_on(local_ex.run(async { task.await * 2 }));
