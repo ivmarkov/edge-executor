@@ -12,7 +12,9 @@ use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::task::Wake;
 
-pub use async_task::{Runnable, Task};
+use async_task::Runnable;
+
+pub use async_task::{FallibleTask, Task};
 
 use atomic_waker::AtomicWaker;
 
