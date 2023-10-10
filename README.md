@@ -20,7 +20,7 @@ A `no_std` drop-in replacement for [smol](https://github.com/smol-rs/smol)'s [as
 
 - Lockless, atomic-based, bounded task queue by default, which works well for waking the executor directly from an ISR on e.g. FreeRTOS or ESP-IDF (unbounded also an option with feature `unbounded`, yet that might mean potential allocations in an ISR context, which should be avoided).
 
-**Useful features inspired by [async-executor](https://github.com/smol-rs/async-executor)**:
+**Great features carried over from [async-executor](https://github.com/smol-rs/async-executor)**:
 
 - Futures spawned on `edge_executor::LocalExecutor` need to live only as long as the executor itself, which enables stack borrows;
 

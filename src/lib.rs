@@ -108,8 +108,8 @@ impl<'a, const C: usize> Executor<'a, C> {
     /// later, when the task is scheduled for polling.
     pub fn spawn<F>(&self, fut: F) -> Task<F::Output>
     where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
+        F: Future + Send + 'a,
+        F::Output: Send + 'a,
     {
         unsafe { self.spawn_unchecked(fut) }
     }
@@ -179,7 +179,7 @@ impl<'a, const C: usize> Executor<'a, C> {
     /// ```
     pub async fn run<F>(&self, fut: F) -> F::Output
     where
-        F: Future + Send + 'static,
+        F: Future + Send + 'a,
     {
         unsafe { self.run_unchecked(fut).await }
     }
