@@ -26,6 +26,4 @@ A `no_std` drop-in replacement for [smol](https://github.com/smol-rs/smol)'s [as
 
 - Completely portable and async. `Executor::run` simply returns a `Future`. Polling this future runs the executor, i.e. `block_on(executor.run(core::future:pending::<()>()))`;
 
-**TODO**:
-
-Upstream the `portable-atomic` dependency into `async-task` (and possibly into `crossbeam-queue`) so that the crate can compile on targets that do not support `core::sync` atomics.
+- `const new` constructor function.

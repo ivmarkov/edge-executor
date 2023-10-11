@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 
 [patch.crates-io]
-async-task = { git = "https://github.com/ivmarkov/async-task" }
+async-task = { git = "https://github.com/smol-rs/async-task" }
 
 [features]
 default = ["std"]
