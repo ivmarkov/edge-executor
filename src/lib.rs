@@ -8,6 +8,7 @@
 #[cfg(all(feature = "heapless", feature = "unbounded"))]
 compile_error!("Feature `heapless` is not compatible with feature `unbounded`.");
 
+use core::cell::OnceCell;
 use core::future::{poll_fn, Future};
 use core::marker::PhantomData;
 use core::task::{Context, Poll};
@@ -56,13 +57,7 @@ pub use futures_lite::future::block_on;
 ///     }));
 /// ```
 pub struct Executor<'a, const C: usize = 64> {
-    #[cfg(all(not(feature = "heapless"), feature = "unbounded"))]
-    queue: Arc<crossbeam_queue::SegQueue<Runnable>>,
-    #[cfg(all(not(feature = "heapless"), not(feature = "unbounded")))]
-    queue: Arc<crossbeam_queue::ArrayQueue<Runnable>>,
-    #[cfg(feature = "heapless")]
-    queue: Arc<heapless::mpmc::MpMcQueue<Runnable, C>>,
-    waker: Arc<AtomicWaker>,
+    state: OnceCell<State<C>>,
     _invariant: PhantomData<core::cell::UnsafeCell<&'a ()>>,
 }
 
@@ -76,15 +71,9 @@ impl<'a, const C: usize> Executor<'a, C> {
     ///
     /// let ex: Executor = Default::default();
     /// ```
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            #[cfg(all(not(feature = "heapless"), feature = "unbounded"))]
-            queue: Arc::new(crossbeam_queue::SegQueue::new()),
-            #[cfg(all(not(feature = "heapless"), not(feature = "unbounded")))]
-            queue: Arc::new(crossbeam_queue::ArrayQueue::new(C)),
-            #[cfg(feature = "heapless")]
-            queue: Arc::new(heapless::mpmc::MpMcQueue::new()),
-            waker: Arc::new(AtomicWaker::new()),
+            state: OnceCell::new(),
             _invariant: PhantomData,
         }
     }
@@ -191,7 +180,7 @@ impl<'a, const C: usize> Executor<'a, C> {
 
     /// Polls the first task scheduled for execution by the executor.
     fn poll_runnable(&self, ctx: &Context<'_>) -> Poll<Runnable> {
-        self.waker.register(ctx.waker());
+        self.state().waker.register(ctx.waker());
 
         if let Some(runnable) = self.try_runnable() {
             Poll::Ready(runnable)
@@ -211,12 +200,12 @@ impl<'a, const C: usize> Executor<'a, C> {
 
         #[cfg(not(feature = "heapless"))]
         {
-            runnable = self.queue.pop();
+            runnable = self.state().queue.pop();
         }
 
         #[cfg(feature = "heapless")]
         {
-            runnable = self.queue.dequeue();
+            runnable = self.state().queue.dequeue();
         }
 
         runnable
@@ -227,8 +216,8 @@ impl<'a, const C: usize> Executor<'a, C> {
         F: Future,
     {
         let schedule = {
-            let queue = self.queue.clone();
-            let waker = self.waker.clone();
+            let queue = self.state().queue.clone();
+            let waker = self.state().waker.clone();
 
             move |runnable| {
                 #[cfg(all(not(feature = "heapless"), feature = "unbounded"))]
@@ -270,6 +259,11 @@ impl<'a, const C: usize> Executor<'a, C> {
         };
 
         run_forever.or(fut).await
+    }
+
+    /// Returns a reference to the inner state.
+    fn state(&self) -> &State<C> {
+        self.state.get_or_init(|| State::new())
     }
 }
 
@@ -313,7 +307,7 @@ impl<'a, const C: usize> LocalExecutor<'a, C> {
     ///
     /// let local_ex: LocalExecutor = Default::default();
     /// ```
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             executor: Executor::<C>::new(),
             _not_send: PhantomData,
@@ -413,5 +407,29 @@ impl<'a, const C: usize> LocalExecutor<'a, C> {
 impl<'a, const C: usize> Default for LocalExecutor<'a, C> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+struct State<const C: usize> {
+    #[cfg(all(not(feature = "heapless"), feature = "unbounded"))]
+    queue: Arc<crossbeam_queue::SegQueue<Runnable>>,
+    #[cfg(all(not(feature = "heapless"), not(feature = "unbounded")))]
+    queue: Arc<crossbeam_queue::ArrayQueue<Runnable>>,
+    #[cfg(feature = "heapless")]
+    queue: Arc<heapless::mpmc::MpMcQueue<Runnable, C>>,
+    waker: Arc<AtomicWaker>,
+}
+
+impl<const C: usize> State<C> {
+    fn new() -> Self {
+        Self {
+            #[cfg(all(not(feature = "heapless"), feature = "unbounded"))]
+            queue: Arc::new(crossbeam_queue::SegQueue::new()),
+            #[cfg(all(not(feature = "heapless"), not(feature = "unbounded")))]
+            queue: Arc::new(crossbeam_queue::ArrayQueue::new(C)),
+            #[cfg(feature = "heapless")]
+            queue: Arc::new(heapless::mpmc::MpMcQueue::new()),
+            waker: Arc::new(AtomicWaker::new()),
+        }
     }
 }
