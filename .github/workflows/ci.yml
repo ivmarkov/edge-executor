@@ -37,6 +37,6 @@ jobs:
       - name: Build | Compile
         run: cargo build
       - name: Build | Compile no_std
-        run: cargo build --no-default-features --features portable-atomic,heapless --target riscv32imc-unknown-none-elf
+        run: cargo build --no-default-features --features portable-atomic,heapless,critical-section --target riscv32imc-unknown-none-elf
       - name: Build | Test
         run: cargo test
