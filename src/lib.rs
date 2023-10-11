@@ -263,7 +263,7 @@ impl<'a, const C: usize> Executor<'a, C> {
 
     /// Returns a reference to the inner state.
     fn state(&self) -> &State<C> {
-        self.state.get_or_init(|| State::new())
+        self.state.get_or_init(State::new)
     }
 }
 
