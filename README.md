@@ -10,7 +10,8 @@ A `no_std` drop-in replacement for [smol](https://github.com/smol-rs/smol)'s [as
 
 ```rust
 // ESP-IDF example, local execution, local borrows.
-// With STD enabled, you can also just use `edge_executor::block_on` instead of `esp_idf_svc::hal::task::block_on`.
+// With STD enabled, you can also just use `edge_executor::block_on` 
+// instead of `esp_idf_svc::hal::task::block_on`.
 
 use edge_executor::LocalExecutor;
 use esp_idf_svc::hal::task::block_on;
