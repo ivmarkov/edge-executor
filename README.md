@@ -8,8 +8,7 @@ This crate ships a minimal async executor suitable for microcontrollers and embe
 
 A `no_std` drop-in replacement for [smol](https://github.com/smol-rs/smol)'s [async-executor](https://github.com/smol-rs/async-executor), with the implementation being a thin wrapper around [smol](https://github.com/smol-rs/smol)'s [async-task](https://github.com/smol-rs/async-task) as well.
 
-**STD example, work-stealing execution:**
-
+STD example, work-stealing execution:
 ```rust
 use async_channel::unbounded;
 use easy_parallel::Parallel;
@@ -31,8 +30,7 @@ fn main() {
 }
 ```
 
-**WASM example:**
-
+WASM example:
 ```rust
 use log::{info, Level};
 
@@ -63,8 +61,7 @@ fn main() {
 }
 ```
 
-**ESP-IDF example, local execution, local borrows:**
-
+ESP-IDF example, local execution, local borrows:
 ```rust
 use edge_executor::{block_on, LocalExecutor};
 
