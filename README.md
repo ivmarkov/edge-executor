@@ -8,8 +8,36 @@ This crate ships a minimal async executor suitable for microcontrollers and embe
 
 A `no_std` drop-in replacement for [smol](https://github.com/smol-rs/smol)'s [async-executor](https://github.com/smol-rs/async-executor), with the implementation being a thin wrapper around [smol](https://github.com/smol-rs/smol)'s [async-task](https://github.com/smol-rs/async-task) as well.
 
-STD example, work-stealing execution:
 ```rust
+// ESP-IDF example, local execution, local borrows.
+// With STD enabled, you can also just use `edge_executor::block_on` instead of `esp_idf_svc::hal::task::block_on`.
+
+use edge_executor::LocalExecutor;
+use esp_idf_svc::hal::task::block_on;
+
+fn main() {
+    let local_ex: LocalExecutor = Default::default();
+
+    // Borrowed by `&mut` inside the future spawned on the executor
+    let mut data = 3;
+
+    let data = &mut data;
+
+    let task = local_ex.spawn(async move {
+        *data += 1;
+
+        *data
+    });
+
+    let res = block_on(local_ex.run(async { task.await * 2 }));
+
+    assert_eq!(res, 8);
+}
+```
+
+```rust
+// STD example, work-stealing execution.
+
 use async_channel::unbounded;
 use easy_parallel::Parallel;
 
@@ -30,8 +58,9 @@ fn main() {
 }
 ```
 
-WASM example:
 ```rust
+// WASM example.
+
 use log::{info, Level};
 
 use edge_executor::LocalExecutor;
@@ -46,6 +75,7 @@ static LOCAL_EX: StaticCell<LocalExecutor> = StaticCell::new();
 fn main() {
     console_log::init_with_level(Level::Info).unwrap();
 
+    // Local executor (futures can be `!Send`) yet `'static`
     let local_ex = &*LOCAL_EX.init(Default::default());
 
     local_ex
@@ -58,30 +88,6 @@ fn main() {
         .detach();
 
     spawn_local(local_ex.run(core::future::pending::<()>()));
-}
-```
-
-ESP-IDF example, local execution, local borrows:
-```rust
-use edge_executor::{block_on, LocalExecutor};
-
-fn main() {
-    let local_ex: LocalExecutor = Default::default();
-
-    // Borrowed by `&mut` inside the future spawned on the executor
-    let mut data = 3;
-
-    let data = &mut data;
-
-    let task = local_ex.spawn(async move {
-        *data += 1;
-
-        *data
-    });
-
-    let res = block_on(local_ex.run(async { task.await * 2 }));
-
-    assert_eq!(res, 8);
 }
 ```
 
