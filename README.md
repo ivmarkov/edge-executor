@@ -8,6 +8,86 @@ This crate ships a minimal async executor suitable for microcontrollers and embe
 
 A `no_std` drop-in replacement for [smol](https://github.com/smol-rs/smol)'s [async-executor](https://github.com/smol-rs/async-executor), with the implementation being a thin wrapper around [smol](https://github.com/smol-rs/smol)'s [async-task](https://github.com/smol-rs/async-task) as well.
 
+**STD example, work-stealing execution:**
+
+```rust
+use async_channel::unbounded;
+use easy_parallel::Parallel;
+
+use edge_executor::{Executor, block_on};
+
+fn main() {
+    let ex: Executor = Default::default();
+    let (signal, shutdown) = unbounded::<()>();
+
+    Parallel::new()
+        // Run four executor threads.
+        .each(0..4, |_| block_on(ex.run(shutdown.recv())))
+        // Run the main future on the current thread.
+        .finish(|| block_on(async {
+            println!("Hello world!");
+            drop(signal);
+        }));
+}
+```
+
+**WASM example:**
+
+```rust
+use log::{info, Level};
+
+use edge_executor::LocalExecutor;
+
+use static_cell::StaticCell;
+use wasm_bindgen_futures::spawn_local;
+
+use gloo_timers::future::TimeoutFuture;
+
+static LOCAL_EX: StaticCell<LocalExecutor> = StaticCell::new();
+
+fn main() {
+    console_log::init_with_level(Level::Info).unwrap();
+
+    let local_ex = &*LOCAL_EX.init(Default::default());
+
+    local_ex
+        .spawn(async {
+            loop {
+                info!("Tick");
+                TimeoutFuture::new(1000).await;
+            }
+        })
+        .detach();
+
+    spawn_local(local_ex.run(core::future::pending::<()>()));
+}
+```
+
+**ESP-IDF example, local execution, local borrows:**
+
+```rust
+use edge_executor::{block_on, LocalExecutor};
+
+fn main() {
+    let local_ex: LocalExecutor = Default::default();
+
+    // Borrowed by `&mut` inside the future spawned on the executor
+    let mut data = 3;
+
+    let data = &mut data;
+
+    let task = local_ex.spawn(async move {
+        *data += 1;
+
+        *data
+    });
+
+    let res = block_on(local_ex.run(async { task.await * 2 }));
+
+    assert_eq!(res, 8);
+}
+```
+
 **Highlights**
 
 - `no_std` (but does need `alloc`):
