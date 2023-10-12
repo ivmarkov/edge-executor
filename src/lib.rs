@@ -1,10 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-// #[cfg(feature = "portable-atomic")]
-// compile_error!(
-//     "Support for targets without atomics is incomplete as `async-task` does not yet support those."
-// );
-
 #[cfg(all(feature = "heapless", feature = "unbounded"))]
 compile_error!("Feature `heapless` is not compatible with feature `unbounded`.");
 
