@@ -99,6 +99,7 @@ fn main() {
   - For a `no_std` *and* "no_alloc" executor, look at [embassy-executor](https://github.com/embassy-rs/embassy/tree/main/embassy-executor), which statically pre-allocates all tasks.
 
 - Works on targets which have no `core::sync::atomic` support, thanks to [portable-atomic](https://github.com/taiki-e/portable-atomic);
+  - NOTE: When enabling the `portable-atomic` feature, please patch the `async-task` dependency to point to its GH repo, because the `portable-atomic` support in `async-task` is not released on crates.io yet.
 
 - Does not assume an RTOS and can run completely bare-metal too;
 
