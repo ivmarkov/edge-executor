@@ -10,9 +10,6 @@ repository = "https://github.com/ivmarkov/edge-executor"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 
-[patch.crates-io]
-async-task = { git = "https://github.com/smol-rs/async-task" }
-
 [features]
 default = ["std"]
 std = ["futures-lite/std", "once_cell/std"]
@@ -25,7 +22,7 @@ heapless = { version = "0.7", default-features = false, features = ["cas"], opti
 portable-atomic = { version = "1.4", features = ["critical-section"], optional = true }
 portable-atomic-util = { version = "0.1", default-features = false, features = ["alloc"], optional = true }
 crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }
-async-task = { version = "4", default-features = false }
+async-task = { version = "4.4.5", default-features = false }
 atomic-waker = { version = "1", default-features = false }
 futures-lite = { version = "1", default-features = false }
 once_cell = { version = "1.18", default-features = false }
