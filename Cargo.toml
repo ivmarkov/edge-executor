@@ -1,6 +1,6 @@
 [package]
 name = "edge-executor"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["Ivan Markov <ivan.markov@gmail.com>"]
 edition = "2021"
 categories = ["embedded", "hardware-support"]
@@ -10,15 +10,19 @@ repository = "https://github.com/ivmarkov/edge-executor"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 
+[patch.crates-io]
+heapless = { git = "https://github.com/rust-embedded/heapless" }
+crossbeam-utils = { git = "https://github.com/crossbeam-rs/crossbeam" }
+
 [features]
 default = ["std"]
 std = ["futures-lite/std", "once_cell/std"]
 critical-section = ["once_cell/critical-section"]
-portable-atomic = ["dep:portable-atomic", "portable-atomic-util", "atomic-waker/portable-atomic", "async-task/portable-atomic"]
+portable-atomic = ["dep:portable-atomic", "portable-atomic-util", "heapless?/portable-atomic", "atomic-waker/portable-atomic", "async-task/portable-atomic"]
 unbounded = []
 
 [dependencies]
-heapless = { version = "0.7", default-features = false, features = ["cas"], optional = true }
+heapless = { version = "0.8", default-features = false, optional = true }
 portable-atomic = { version = "1.4", features = ["critical-section"], optional = true }
 portable-atomic-util = { version = "0.1", default-features = false, features = ["alloc"], optional = true }
 crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }
